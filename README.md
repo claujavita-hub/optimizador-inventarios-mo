@@ -55,6 +55,8 @@ entrega:
   alcanzó, por lo que no depende de supuestos.
 - **Nivel técnico:** días necesarios por etapa × venta diaria, más el stock de seguridad. Solo se calcula cuando hay
   días reales por etapa, ya sea porque la hoja `Ciclo_Transito` está completa o porque se ingresan en la app.
+- **Flujo de cada grupo:** el PT se mide sobre la venta (Own Sales); el Pre-PT, sobre la **producción mensual**
+  (columna `Producción MMlb` de la hoja de inventario físico). Sin producción, el Pre-PT no tiene nivel técnico.
 - **Sensibilidad del stock de seguridad** frente al nivel de servicio, el lead time y el mix (segmentos independientes).
 - **Recomendaciones:** tendencias como un Pre-PT que crece sin que crezca la venta, un stock que no sigue a la venta,
   el tránsito implícito, la cobertura de la venta del mes siguiente y el valor de un día de cobertura en US$.

@@ -113,6 +113,7 @@ class MonthRow:
     pt: float | None = None
     prept: float | None = None
     sales: float | None = None
+    production: float | None = None
     ss: float | None = None
     not_assigned: float | None = None
     assigned: float | None = None
@@ -193,7 +194,8 @@ def load_aggregate(source) -> AggData:
     hdr, body = _header_rows(ws, ("mes", "stock_total")) if ws else (None, [])
     if hdr:
         c = dict(total=_col(hdr, "stock_total"), pt=_col(hdr, "producto_terminado"), prept=_col(hdr, "pre_pt"),
-                 sales=_col(hdr, "own_sales", "ventas"), ss=_col(hdr, "safety"))
+                 sales=_col(hdr, "own_sales", "ventas"), ss=_col(hdr, "safety"),
+                 production=_col(hdr, "produccion_mmlb", "produccion"))
         for row in body:
             m = to_month(row[0])
             if not m:
@@ -287,6 +289,17 @@ def load_aggregate(source) -> AggData:
     wb.close()
 
     rows = sorted(months.values(), key=lambda r: r.month)
+    # Si el archivo se guardó sin recalcular, las celdas con fórmula vienen vacías: se reconstruyen.
+    for i, r in enumerate(rows):
+        if r.pt is None and r.not_assigned is not None:
+            r.pt = sum(v or 0 for v in (r.not_assigned, r.assigned, r.in_transit, r.warehouse, r.consignment))
+        if r.prept is None and r.total is not None and r.pt is not None:
+            r.prept = r.total - r.pt
+        if r.next_sales is None and i + 1 < len(rows) and r.not_assigned is not None:
+            r.next_sales = rows[i + 1].sales
+    if rows and not any(r.production is not None for r in rows):
+        warnings.append("Sin producción mensual (columna 'Producción MMlb' de la hoja de inventario físico): "
+                        "no se calcula la cobertura técnica del Pre-PT y sus días se expresan sobre la venta.")
     if not rows:
         warnings.append("No hay meses con datos.")
     return AggData(rows, p, skus, warnings, title)
@@ -302,6 +315,8 @@ class GroupResult:
     pipeline: float | None = None
     buffer: float = 0.0
     detail: str = ""
+    flow_day: float = 0.0          # flujo diario que pasa por el grupo (venta o producción)
+    flow_label: str = "venta"
 
     @property
     def actual(self) -> float:
@@ -385,29 +400,48 @@ def analyze_aggregate(data: AggData) -> AggResult:
     def tech(keys, extra=0.0):
         return d * sum(s.days for s in p.stages if s.key in keys) + extra if set(keys) <= known else None
 
+    def grp(*args, **kw):
+        return GroupResult(*args, flow_day=d, **kw)
+
+    # El Pre-PT se vacía con la producción (no con la venta): su flujo es la producción mensual.
     prept_keys = ("compra", "transito_mp", "puerto", "espera", "proceso")
-    groups = [GroupResult("Pre-PT (compra + MP + WIP)", prept_keys, col("prept"), tech(prept_keys), ss_mp,
-                          "d x días de compra, tránsito MP, puerto, espera y proceso + SS de materia prima")]
+    prod = [m.production for m in data.months if m.production is not None]
+    if prod:
+        dp = mean(prod) / 30
+        sd_p = (stdev(prod) if len(prod) >= 3 else sd_month) / math.sqrt(30)
+        ss_mp = safety(z, p.lt_mp(), sd_p, dp, p.desv_lt_mp_dias, seg)
+        pipe = dp * sum(s.days for s in p.stages if s.key in prept_keys) if set(prept_keys) <= known else None
+        prept = GroupResult("Pre-PT (compra + MP + WIP)", prept_keys, col("prept"), pipe, ss_mp,
+                            "producción diaria x días de compra, tránsito MP, puerto, espera y proceso + SS MP",
+                            flow_day=dp, flow_label="producción")
+    else:
+        prept = GroupResult("Pre-PT (compra + MP + WIP)", prept_keys, col("prept"), None, ss_mp,
+                            "Técnico: falta la producción mensual (flujo del Pre-PT)",
+                            flow_day=d, flow_label="venta (aprox.)")
+    groups = [prept]
     if any(m.not_assigned is not None for m in data.months):
         consig = _avg(m.consignment for m in data.months) or 0.0
         groups += [
-            GroupResult("PT sin asignar (Not Assigned)", ("pt",), col("not_assigned"), tech(("pt",)), ss_pt,
+            grp("PT sin asignar (Not Assigned)", ("pt",), col("not_assigned"), tech(("pt",)), ss_pt,
                         "d x días de liberación + ciclo de campaña + SS de producto terminado"),
-            GroupResult("Asignado + In-Transit", ("despacho",), col("assigned", "in_transit"), tech(("despacho",)), 0.0,
+            grp("Asignado + In-Transit", ("despacho",), col("assigned", "in_transit"), tech(("despacho",)), 0.0,
                         "d x días de preparación + tránsito a cliente"),
-            GroupResult("Bodegas destino + consignación", ("bodega",), col("warehouse", "consignment"),
+            grp("Bodegas destino + consignación", ("bodega",), col("warehouse", "consignment"),
                         d * p.dias_bodega_destino + consig if "dias_bodega_destino" in p.sources else None, 0.0,
                         "d x días de bodega destino + consignación contractual"),
         ]
     else:
-        groups.append(GroupResult("Producto terminado", ("pt", "despacho"), col("pt"),
+        groups.append(grp("Producto terminado", ("pt", "despacho"), col("pt"),
                                   tech(("pt", "despacho"), d * p.dias_bodega_destino), ss_pt,
                                   "d x días de PT + despacho + bodega destino + SS"))
 
     stats: dict[str, float | None] = {"cv": sd_month / d_month if d_month else None}
     pairs = [(r.total, r.sales) for r in rows if r.total is not None]
     if len(pairs) >= 3:
-        stats["corr_stock_ventas"] = statistics.correlation([a for a, _ in pairs], [b for _, b in pairs])
+        try:
+            stats["corr_stock_ventas"] = statistics.correlation([a for a, _ in pairs], [b for _, b in pairs])
+        except statistics.StatisticsError:      # stock o venta constantes: no hay correlación que medir
+            stats["corr_stock_ventas"] = None
         stats["cv_stock"] = stdev([a for a, _ in pairs]) / mean([a for a, _ in pairs])
         stats["stock_medio"] = mean([a for a, _ in pairs])
     if len(rows) >= 6:
@@ -452,19 +486,21 @@ def _recommendations(r: AggResult) -> list[list]:
                  "caja y en intereses evitados.", None, None])
 
     for g in r.groups:
+        fd = g.flow_day or d
         gap = g.actual - g.benchmark
-        if gap >= d:
+        if gap >= fd:
             recs.append(["Alta" if gap * usd >= 30 else "Media", f"{g.name}: volver al nivel ya demostrado",
-                         f"Promedio {g.actual:.2f} MMlb ({g.actual / d:.0f} días); en el 25% de los mejores meses "
-                         f"estuvo en {g.benchmark:.2f} MMlb ({g.benchmark / d:.0f} días) o menos.",
+                         f"Promedio {g.actual:.2f} MMlb ({g.actual / fd:.0f} días de {g.flow_label}); en el 25% de "
+                         f"los mejores meses estuvo en {g.benchmark:.2f} MMlb ({g.benchmark / fd:.0f} días) o menos.",
                          _action_for(g.name), gap, gap * usd])
         if g.technical is not None:
             tgap = g.actual - g.technical
-            if abs(tgap) >= d:
+            if abs(tgap) >= fd:
                 recs.append(["Alta" if tgap > 0 else "Media",
                              f"{g.name}: {'sobre' if tgap > 0 else 'bajo'} la cobertura técnica",
-                             f"Promedio {g.actual:.2f} MMlb vs técnico {g.technical:.2f} MMlb "
-                             f"({g.technical / d:.0f} días = pipeline {g.pipeline / d:.0f} + buffer {g.buffer / d:.0f}).",
+                             f"Promedio {g.actual:.2f} MMlb ({g.actual / fd:.0f} días de {g.flow_label}) vs técnico "
+                             f"{g.technical:.2f} MMlb ({g.technical / fd:.0f} días = pipeline {g.pipeline / fd:.0f} + "
+                             f"buffer {g.buffer / fd:.0f}).",
                              _action_for(g.name) if tgap > 0 else
                              "Con estos días por etapa el stock actual no alcanza: revisar los días informados o "
                              "el riesgo de servicio de la etapa.", tgap, tgap * usd])
@@ -521,6 +557,13 @@ def _recommendations(r: AggResult) -> list[list]:
                      "El In-Transit remanente y el Not Assigned están financiando meses posteriores: definir "
                      "cuántos días hacia adelante se quiere cubrir y convertirlo en política.", None, None])
 
+    pre = r.groups[0]
+    if pre.flow_label != "producción":
+        recs.append(["Media", "Agregar producción mensual",
+                     "El Pre-PT se vacía con la producción, no con la venta. Sin la producción mensual no se puede "
+                     "saber si su stock corresponde a los días de compra, tránsito, puerto, espera y proceso.",
+                     "Completar la columna 'Producción MMlb' de la hoja 08_Inventario_Fisico (una cifra por mes).",
+                     None, None])
     missing = [s.name for s in p.stages if not s.known]
     if missing:
         recs.append(["Media", "Completar días por etapa (03_Ciclo_Transito)",
@@ -568,39 +611,46 @@ def month_table(r: AggResult) -> dict:
     rows = []
     for m in r.data.months:
         s = m.sales
-        rows.append([m.label, m.total, m.pt, m.prept, s,
+        pr = m.production
+        rows.append([m.label, m.total, m.pt, m.prept, s, pr,
                      s / m.total if s and m.total else None, s / m.pt if s and m.pt else None,
-                     s / m.prept if s and m.prept else None,
+                     pr / m.prept if pr and m.prept else None,
                      m.total / s * 30 if s and m.total else None,
+                     m.prept / pr * 30 if pr and m.prept is not None else None,
                      m.not_assigned / d if m.not_assigned is not None and d else None,
                      m.assigned / d if m.assigned is not None and d else None,
                      m.in_transit / d if m.in_transit is not None and d else None,
                      m.warehouse / d if m.warehouse is not None and d else None,
                      ((m.assigned or 0) + (m.warehouse or 0)) / m.next_sales
                      if m.next_sales and m.assigned is not None else None])
-    return dict(headers=["Mes", "Stock total MMlb", "PT MMlb", "Pre-PT MMlb", "Ventas MMlb",
-                         "Ciclos/mes total", "Ciclos/mes PT", "Ciclos/mes Pre-PT", "Días stock total",
+    return dict(headers=["Mes", "Stock total MMlb", "PT MMlb", "Pre-PT MMlb", "Ventas MMlb", "Producción MMlb",
+                         "Ciclos/mes total (venta)", "Ciclos/mes PT (venta)", "Ciclos/mes Pre-PT (producción)",
+                         "Días stock total", "Días Pre-PT (producción)",
                          "Días Not Assigned", "Días Assigned", "Días In-Transit", "Días Warehouse",
                          "% venta sig. cubierta por bodega"],
-                rows=rows, fmts=[None, X1, X1, X1, X1, X3, X3, X3, D0, D0, D0, D0, D0, "0%"])
+                rows=rows, fmts=[None, X1, X1, X1, X1, X1, X3, X3, X3, D0, D0, D0, D0, D0, D0, "0%"])
 
 
 def group_table(r: AggResult) -> dict:
     d, usd = r.d_day, r.data.params.precio_usd_lb
 
-    def row(name, actual, bench, tech, detail):
-        return [name, actual, actual / d, bench, bench / d, actual - bench, (actual - bench) * usd,
-                tech, tech / d if tech is not None else None,
+    def row(name, fd, flow, actual, bench, tech, detail):
+        return [name, flow, actual, actual / fd, bench, bench / fd, actual - bench, (actual - bench) * usd,
+                tech, tech / fd if tech is not None else None,
                 (actual - tech) * usd if tech is not None else None, detail]
 
-    rows = [row(g.name, g.actual, g.benchmark, g.technical,
-                g.detail if g.technical is not None else "Técnico: faltan días reales por etapa") for g in r.groups]
-    rows.append(row("TOTAL", r.actual_total, r.benchmark_total, r.technical_total,
+    def note(g):
+        if g.technical is not None:
+            return g.detail
+        return g.detail if g.detail.startswith("Técnico:") else "Técnico: faltan días reales por etapa"
+
+    rows = [row(g.name, g.flow_day or d, g.flow_label, g.actual, g.benchmark, g.technical, note(g)) for g in r.groups]
+    rows.append(row("TOTAL", d, "venta", r.actual_total, r.benchmark_total, r.technical_total,
                     "El nivel demostrado suma los mejores meses de cada grupo (no ocurrieron todos a la vez)"))
-    return dict(headers=["Grupo", "Actual MMlb", "Actual días", "Demostrado MMlb (P25)", "Demostrado días",
-                         "Exceso vs demostrado MMlb", "Exceso vs demostrado US$mm", "Técnico MMlb", "Técnico días",
-                         "Exceso vs técnico US$mm", "Nota"],
-                rows=rows, fmts=[None, X2, D0, X2, D0, X2, "#,##0.0", X2, D0, "#,##0.0", None])
+    return dict(headers=["Grupo", "Días medidos sobre", "Actual MMlb", "Actual días", "Demostrado MMlb (P25)",
+                         "Demostrado días", "Exceso vs demostrado MMlb", "Exceso vs demostrado US$mm",
+                         "Técnico MMlb", "Técnico días", "Exceso vs técnico US$mm", "Nota"],
+                rows=rows, fmts=[None, None, X2, D0, X2, D0, X2, "#,##0.0", X2, D0, "#,##0.0", None])
 
 
 def stage_table(r: AggResult) -> dict:

@@ -126,7 +126,10 @@ def aggregate_page(raw: bytes) -> None:
     with tabs[2]:
         mt = df(ag.month_table(r))
         st.dataframe(mt, hide_index=True, width="stretch")
-        st.line_chart(mt.set_index("Mes")[["Stock total MMlb", "PT MMlb", "Pre-PT MMlb", "Ventas MMlb"]])
+        series = ["Stock total MMlb", "PT MMlb", "Pre-PT MMlb", "Ventas MMlb"]
+        if mt["Producción MMlb"].notna().any():
+            series.append("Producción MMlb")
+        st.line_chart(mt.set_index("Mes")[series])
     with tabs[3]:
         st.dataframe(df(ag.stage_table(r)), hide_index=True, width="stretch")
     with tabs[4]:

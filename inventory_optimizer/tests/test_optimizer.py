@@ -164,3 +164,39 @@ class AggregateTest(unittest.TestCase):
         disp = next(g for g in r2.groups if g.name.startswith("Asignado"))
         self.assertAlmostEqual(disp.technical, 8.0 / 30 * 30)
         self.assertIsNotNone(group_table(r2)["rows"][2][7])
+
+
+class AggregateProductionTest(unittest.TestCase):
+    """La producción es el flujo del Pre-PT; sin ella no hay técnico de Pre-PT."""
+
+    def _book(self, production):
+        hdr = ["Mes", "Stock total MMlb", "Producto terminado MMlb", "Pre-PT MMlb", "Own Sales MMlb"]
+        if production is not None:
+            hdr.append("Producción MMlb")
+        fis = [["Inventario físico"], [], hdr]
+        for i, m in enumerate(["Ene-26", "Feb-26", "Mar-26", "Abr-26"]):
+            row = [m, 30.0, 20.0, None, 9.0]          # Pre-PT vacío: fórmula sin valor guardado
+            if production is not None:
+                row.append(production)
+            fis.append(row)
+        ciclo = [[], [], ["Etapa", "Días actuales", "Días objetivo"]]
+        for name in ("Compra/espera embarque", "Tránsito", "Puerto/aduana/recepción", "Espera pre-proceso",
+                     "Proceso productivo", "Producto terminado/espera", "Despacho/entrega"):
+            ciclo.append([name, 10, None])
+        return _xlsx({"08_Inventario_Fisico": fis, "03_Ciclo_Transito": ciclo})
+
+    def test_production_flow(self):
+        from inventory_optimizer.aggregate import analyze_aggregate, load_aggregate
+        r = analyze_aggregate(load_aggregate(self._book(6.0)))
+        pre = r.groups[0]
+        self.assertAlmostEqual(pre.actual, 10.0)                  # 30 - 20 reconstruido
+        self.assertEqual(pre.flow_label, "producción")
+        self.assertAlmostEqual(pre.flow_day, 6.0 / 30)
+        self.assertAlmostEqual(pre.pipeline, 6.0 / 30 * 50)       # 5 etapas x 10 días
+
+    def test_without_production(self):
+        from inventory_optimizer.aggregate import analyze_aggregate, load_aggregate
+        data = load_aggregate(self._book(None))
+        r = analyze_aggregate(data)
+        self.assertIsNone(r.groups[0].technical)
+        self.assertTrue(any("producción" in w.lower() for w in data.warnings))
