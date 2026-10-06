@@ -23,11 +23,11 @@ con la red de plantas, clientes, tránsitos y procesos calcula:
 ## Uso
 
 App web (sirve desde el iPad si se publica en Streamlit Cloud con
-*Main file* `inventory_optimizer/streamlit_app.py`):
+*Main file* `streamlit_app.py`, el valor por defecto):
 
 ```bash
 pip install -r requirements.txt
-streamlit run inventory_optimizer/streamlit_app.py
+streamlit run streamlit_app.py
 ```
 
 Línea de comandos:

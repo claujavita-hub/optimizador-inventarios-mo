@@ -4,15 +4,22 @@
 """
 from __future__ import annotations
 
-import io
 import sys
-from dataclasses import replace
 from pathlib import Path
 
-import pandas as pd
-import streamlit as st
+# Streamlit agrega la carpeta de este script (la del paquete) a sys.path. Eso
+# expone report.py, engine.py, etc. como módulos sueltos y, si alguien los
+# importa así, fallan sus imports relativos (ImportError visto en Streamlit
+# Cloud). Se quita esa carpeta y se importa el paquete desde la raíz del repo.
+_PKG = Path(__file__).resolve().parent
+sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _PKG]
+sys.path.insert(0, str(_PKG.parent))
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import io  # noqa: E402
+from dataclasses import replace  # noqa: E402
+
+import pandas as pd  # noqa: E402
+import streamlit as st  # noqa: E402
 
 from inventory_optimizer import analyze, build_recommendations, load_excel, optimize, write_report  # noqa: E402
 from inventory_optimizer.report import (PLANT_HEADERS, detail_tables, kpi_rows, load_table,  # noqa: E402
