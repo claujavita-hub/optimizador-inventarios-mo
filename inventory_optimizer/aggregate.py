@@ -81,6 +81,7 @@ class AggParams:
     desv_lt_mp_dias: float = 7.0
     dias_bodega_destino: float = 10.0
     segmentos_independientes: int = 1     # >1 aproxima el efecto mix cliente/SKU/planta sobre el SS
+    stock_inicial: float | None = None    # stock total al cierre del mes previo al primero (balance de masa)
     stages: list[Stage] = field(default_factory=default_stages)
     sources: dict[str, str] = field(default_factory=dict)
 
@@ -92,6 +93,7 @@ class AggParams:
 
 
 PARAM_HELP = {
+    "stock_inicial": "Stock total al cierre del mes previo al primero (para el balance de masa)",
     "precio_usd_lb": "Valor promedio por libra de Mo (US$/lb)",
     "tasa_costo_capital": "Costo anual del capital inmovilizado (tasa de deuda incremental)",
     "nivel_servicio": "Nivel de servicio objetivo para el stock de seguridad",
@@ -114,6 +116,7 @@ class MonthRow:
     prept: float | None = None
     sales: float | None = None
     production: float | None = None
+    tolling: float | None = None          # maquila (material de terceros procesado)
     ss: float | None = None
     not_assigned: float | None = None
     assigned: float | None = None
@@ -195,7 +198,7 @@ def load_aggregate(source) -> AggData:
     if hdr:
         c = dict(total=_col(hdr, "stock_total"), pt=_col(hdr, "producto_terminado"), prept=_col(hdr, "pre_pt"),
                  sales=_col(hdr, "own_sales", "ventas"), ss=_col(hdr, "safety"),
-                 production=_col(hdr, "produccion_mmlb", "produccion"))
+                 production=_col(hdr, "produccion_mmlb", "produccion"), tolling=_col(hdr, "maquila", "tolling"))
         for row in body:
             m = to_month(row[0])
             if not m:
@@ -232,7 +235,9 @@ def load_aggregate(source) -> AggData:
             val = to_float(row[1]) if len(row) > 1 else None
             if val is None:
                 continue
-            if "valor_promedio_por_libra" in label or "precio" in label:
+            if "stock_total_inicial" in label or "saldo_inicial" in label:   # no confundir con "Stock inicial habitual"
+                p.stock_inicial, p.sources["stock_inicial"] = val, f"archivo ({ws.title})"
+            elif "valor_promedio_por_libra" in label or "precio" in label:
                 p.precio_usd_lb, p.sources["precio_usd_lb"] = val, f"archivo ({ws.title})"
             elif "tasa" in label:
                 if val > 0:
@@ -405,7 +410,8 @@ def analyze_aggregate(data: AggData) -> AggResult:
 
     # El Pre-PT se vacía con la producción (no con la venta): su flujo es la producción mensual.
     prept_keys = ("compra", "transito_mp", "puerto", "espera", "proceso")
-    prod = [m.production for m in data.months if m.production is not None]
+    # Producción propia = producción - maquila (el material de maquila es de terceros, no es stock propio).
+    prod = [m.production - (m.tolling or 0) for m in data.months if m.production is not None]
     if prod:
         dp = mean(prod) / 30
         sd_p = (stdev(prod) if len(prod) >= 3 else sd_month) / math.sqrt(30)
@@ -557,21 +563,25 @@ def _recommendations(r: AggResult) -> list[list]:
                      "El In-Transit remanente y el Not Assigned están financiando meses posteriores: definir "
                      "cuántos días hacia adelante se quiere cubrir y convertirlo en política.", None, None])
 
-    bal = [m for m in r.data.months if m.production is not None and m.sales is not None]
-    if len(bal) >= 3 and bal[0].total is not None and bal[-1].total is not None:
-        prod, sold = sum(m.production for m in bal), sum(m.sales for m in bal)
-        # Stock al inicio del primer mes ≈ cierre del mes anterior: se usa el cierre del primero como aproximación.
-        dstock = bal[-1].total - bal[0].total
-        gap = prod - sold - dstock
-        if abs(gap) > 0.05 * sold:
+    bal = balance(r.data)
+    if bal:
+        if abs(bal["gap"]) > 0.05 * bal["venta"]:
             recs.append(["Alta", "Balance de masa: producción vs venta vs stock",
-                         f"{bal[0].label} a {bal[-1].label}: producción {prod:.1f} MMlb, venta {sold:.1f} MMlb, "
-                         f"variación de stock {dstock:+.1f} MMlb. Quedan {gap:+.1f} MMlb sin explicar "
-                         f"({gap / len(bal):+.1f} MMlb/mes).",
+                         f"{bal['desde']} a {bal['hasta']}: producción {bal['produccion']:.1f} MMlb = venta propia "
+                         f"{bal['venta']:.1f} + maquila {bal['maquila']:.1f} + variación de stock "
+                         f"{bal['dstock']:+.1f} ({bal['base']}). Quedan {bal['gap']:+.1f} MMlb sin explicar "
+                         f"({bal['gap'] / bal['meses']:+.1f} MMlb/mes).",
                          "Aclarar qué incluye la producción y no la venta propia ni el stock: maquila de terceros, "
                          "producción intermedia contada dos veces (óxido que luego se convierte en FeMo), ventas no "
                          "incluidas en Own Sales o mermas. Para el Pre-PT usar solo la producción propia.",
                          gap, None])
+        elif bal["base"].startswith("aprox"):
+            recs.append(["Baja", "Balance de masa: cuadra (falta saldo inicial)",
+                         f"Producción {bal['produccion']:.1f} = venta {bal['venta']:.1f} + maquila {bal['maquila']:.1f} "
+                         f"+ stock {bal['dstock']:+.1f}; diferencia {bal['gap']:+.1f} MMlb. La variación de stock se "
+                         f"aproximó con el cierre de {bal['desde']} como saldo inicial.",
+                         "Agregar en 01_Supuestos el 'Stock total inicial' (cierre del mes anterior al primero) para "
+                         "cerrar el balance exacto.", None, None])
     pre = r.groups[0]
     if pre.flow_label != "producción":
         recs.append(["Media", "Agregar producción mensual",
@@ -604,6 +614,39 @@ def _recommendations(r: AggResult) -> list[list]:
     return sorted(recs, key=lambda x: (order[x[0]], -(x[5] or 0)))
 
 
+def balance(data: AggData) -> dict | None:
+    """Producción = venta propia + maquila + variación de stock (+ diferencia sin explicar)."""
+    bal = [m for m in data.months if m.production is not None and m.sales is not None]
+    if len(bal) < 3 or bal[-1].total is None:
+        return None
+    opening = data.params.stock_inicial
+    if opening is not None:
+        base = "saldo inicial informado"
+    elif bal[0].total is not None:
+        opening, base = bal[0].total, f"aprox.: cierre de {bal[0].label} como saldo inicial"
+    else:
+        return None
+    prod = sum(m.production for m in bal)
+    sold = sum(m.sales for m in bal)
+    toll = sum(m.tolling or 0 for m in bal)
+    dstock = bal[-1].total - opening
+    return dict(desde=bal[0].label, hasta=bal[-1].label, meses=len(bal), produccion=prod, venta=sold,
+                maquila=toll, stock_inicial=opening, stock_final=bal[-1].total, dstock=dstock, base=base,
+                gap=prod - sold - toll - dstock, saldo_inicial_implicito=bal[-1].total - (prod - sold - toll))
+
+
+def balance_table(r: "AggResult") -> dict:
+    b = balance(r.data)
+    if not b:
+        return dict(headers=["Concepto", "MMlb"], rows=[["Sin datos de producción", None]], fmts=[None, X1])
+    rows = [["Producción", b["produccion"]], ["(−) Venta propia (Own Sales)", b["venta"]],
+            ["(−) Maquila", b["maquila"]],
+            [f"Stock inicial ({b['base']})", b["stock_inicial"]], [f"Stock final ({b['hasta']})", b["stock_final"]],
+            ["(−) Variación de stock", b["dstock"]], ["= Diferencia sin explicar", b["gap"]],
+            ["Saldo inicial que cerraría el balance", b["saldo_inicial_implicito"]]]
+    return dict(headers=["Concepto", "MMlb"], rows=rows, fmts=[None, X1])
+
+
 def _action_for(name: str) -> str:
     if name.startswith("Pre-PT"):
         return ("Sincronizar compras de concentrado con el programa de producción; reducir esperas pre-proceso y "
@@ -626,8 +669,8 @@ def month_table(r: AggResult) -> dict:
     rows = []
     for m in r.data.months:
         s = m.sales
-        pr = m.production
-        rows.append([m.label, m.total, m.pt, m.prept, s, pr,
+        pr = m.production - (m.tolling or 0) if m.production is not None else None
+        rows.append([m.label, m.total, m.pt, m.prept, s, m.production, m.tolling, pr,
                      s / m.total if s and m.total else None, s / m.pt if s and m.pt else None,
                      pr / m.prept if pr and m.prept else None,
                      m.total / s * 30 if s and m.total else None,
@@ -639,11 +682,12 @@ def month_table(r: AggResult) -> dict:
                      ((m.assigned or 0) + (m.warehouse or 0)) / m.next_sales
                      if m.next_sales and m.assigned is not None else None])
     return dict(headers=["Mes", "Stock total MMlb", "PT MMlb", "Pre-PT MMlb", "Ventas MMlb", "Producción MMlb",
-                         "Ciclos/mes total (venta)", "Ciclos/mes PT (venta)", "Ciclos/mes Pre-PT (producción)",
-                         "Días stock total", "Días Pre-PT (producción)",
+                         "Maquila MMlb", "Producción propia MMlb",
+                         "Ciclos/mes total (venta)", "Ciclos/mes PT (venta)", "Ciclos/mes Pre-PT (prod. propia)",
+                         "Días stock total", "Días Pre-PT (prod. propia)",
                          "Días Not Assigned", "Días Assigned", "Días In-Transit", "Días Warehouse",
                          "% venta sig. cubierta por bodega"],
-                rows=rows, fmts=[None, X1, X1, X1, X1, X1, X3, X3, X3, D0, D0, D0, D0, D0, D0, "0%"])
+                rows=rows, fmts=[None, X1, X1, X1, X1, X1, X1, X1, X3, X3, X3, D0, D0, D0, D0, D0, D0, "0%"])
 
 
 def group_table(r: AggResult) -> dict:
@@ -759,7 +803,7 @@ def write_aggregate_report(r: AggResult, path) -> None:
             c.alignment = Alignment(wrap_text=True, vertical="top")
     _widths(ws, {1: 10, 2: 34, 3: 70, 4: 70, 5: 13, 6: 13})
 
-    for name, tb in (("Rotacion_Mensual", month_table(r)), ("Etapas", stage_table(r)),
+    for name, tb in (("Rotacion_Mensual", month_table(r)), ("Balance_Masa", balance_table(r)), ("Etapas", stage_table(r)),
                      ("Sensibilidad_SS", sensitivity_table(r))):
         ws = wb.create_sheet(name)
         nxt = _table(ws, 1, tb["headers"], tb["rows"], tb["fmts"])

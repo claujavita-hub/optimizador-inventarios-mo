@@ -200,3 +200,19 @@ class AggregateProductionTest(unittest.TestCase):
         r = analyze_aggregate(data)
         self.assertIsNone(r.groups[0].technical)
         self.assertTrue(any("producción" in w.lower() for w in data.warnings))
+
+
+class BalanceTest(unittest.TestCase):
+    def test_tolling_and_opening_stock(self):
+        from inventory_optimizer.aggregate import analyze_aggregate, balance, load_aggregate
+        fis = [["Inventario"], [], ["Mes", "Stock total MMlb", "Producto terminado MMlb", "Pre-PT MMlb",
+                                    "Own Sales MMlb", "Producción MMlb", "Maquila MMlb"]]
+        for m in ("Ene-26", "Feb-26", "Mar-26"):
+            fis.append([m, 31.0, 20.0, 11.0, 8.0, 10.0, 1.5])
+        sup = [["Supuestos"], [], ["Variable", "Valor"], ["Stock total inicial (cierre Dic-25)", 29.5]]
+        data = load_aggregate(_xlsx({"01_Supuestos": sup, "08_Inventario_Fisico": fis}))
+        b = balance(data)
+        self.assertAlmostEqual(b["dstock"], 1.5)
+        self.assertAlmostEqual(b["gap"], 30 - 24 - 4.5 - 1.5)
+        r = analyze_aggregate(data)
+        self.assertAlmostEqual(r.groups[0].flow_day, 8.5 / 30)      # producción propia = 10 - 1,5

@@ -130,6 +130,10 @@ def aggregate_page(raw: bytes) -> None:
         if mt["Producción MMlb"].notna().any():
             series.append("Producción MMlb")
         st.line_chart(mt.set_index("Mes")[series])
+        st.subheader("Balance de masa")
+        st.dataframe(df(ag.balance_table(r)), hide_index=True, width="stretch")
+        st.caption("Producción = venta propia + maquila + variación de stock. Una diferencia grande indica que algún "
+                   "dato no corresponde (producción con intermedios, ventas fuera de Own Sales, saldo inicial).")
     with tabs[3]:
         st.dataframe(df(ag.stage_table(r)), hide_index=True, width="stretch")
     with tabs[4]:
