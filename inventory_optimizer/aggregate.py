@@ -557,6 +557,21 @@ def _recommendations(r: AggResult) -> list[list]:
                      "El In-Transit remanente y el Not Assigned están financiando meses posteriores: definir "
                      "cuántos días hacia adelante se quiere cubrir y convertirlo en política.", None, None])
 
+    bal = [m for m in r.data.months if m.production is not None and m.sales is not None]
+    if len(bal) >= 3 and bal[0].total is not None and bal[-1].total is not None:
+        prod, sold = sum(m.production for m in bal), sum(m.sales for m in bal)
+        # Stock al inicio del primer mes ≈ cierre del mes anterior: se usa el cierre del primero como aproximación.
+        dstock = bal[-1].total - bal[0].total
+        gap = prod - sold - dstock
+        if abs(gap) > 0.05 * sold:
+            recs.append(["Alta", "Balance de masa: producción vs venta vs stock",
+                         f"{bal[0].label} a {bal[-1].label}: producción {prod:.1f} MMlb, venta {sold:.1f} MMlb, "
+                         f"variación de stock {dstock:+.1f} MMlb. Quedan {gap:+.1f} MMlb sin explicar "
+                         f"({gap / len(bal):+.1f} MMlb/mes).",
+                         "Aclarar qué incluye la producción y no la venta propia ni el stock: maquila de terceros, "
+                         "producción intermedia contada dos veces (óxido que luego se convierte en FeMo), ventas no "
+                         "incluidas en Own Sales o mermas. Para el Pre-PT usar solo la producción propia.",
+                         gap, None])
     pre = r.groups[0]
     if pre.flow_label != "producción":
         recs.append(["Media", "Agregar producción mensual",
