@@ -14,6 +14,10 @@ from pathlib import Path
 _PKG = Path(__file__).resolve().parent
 sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _PKG]
 sys.path.insert(0, str(_PKG.parent))
+# Streamlit Cloud actualiza este archivo al hacer push pero mantiene en memoria los módulos ya importados:
+# se descartan para que cada ejecución use el motor de cálculo vigente (evita mezclar versiones).
+for _mod in [m for m in sys.modules if m == "inventory_optimizer" or m.startswith("inventory_optimizer.")]:
+    del sys.modules[_mod]
 
 import io  # noqa: E402
 from dataclasses import replace  # noqa: E402
