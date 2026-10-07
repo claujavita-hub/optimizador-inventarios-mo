@@ -90,6 +90,10 @@ def aggregate_page(raw: bytes) -> None:
                 stg.days, stg.source = val, "ingresado en la app"
             elif val == 0:
                 stg.source = "sin dato"
+        st.header("Bodegas destino")
+        p.stock_spot = st.number_input("Stock para ventas spot (MMlb)", 0.0, 20.0, float(p.stock_spot), 0.1)
+        p.buffer_stock = st.number_input("Buffer stock en bodegas (MMlb)", 0.0, 20.0, float(p.buffer_stock), 0.1)
+        p.pct_venta_bodega = st.slider("% de la venta que pasa por bodega", 0.0, 1.0, float(p.pct_venta_bodega), 0.05)
         p.despacho_incluye_bodega = st.toggle("Despacho/entrega incluye la estadía en bodega destino",
                                               p.despacho_incluye_bodega)
         if not p.despacho_incluye_bodega:

@@ -222,3 +222,25 @@ class BalanceTest(unittest.TestCase):
         self.assertAlmostEqual(b["gap"], 30 - 24 - 4.5 - 1.5)
         r = analyze_aggregate(data)
         self.assertAlmostEqual(r.groups[0].flow_day, 8.5 / 30)      # producción propia = 10 - 1,5
+
+
+class DespachoDetalleTest(unittest.TestCase):
+    def test_split_and_spot(self):
+        from inventory_optimizer.aggregate import analyze_aggregate, load_aggregate
+        fis = [["Inv"], [], ["Mes", "Stock total MMlb", "Producto terminado MMlb", "Pre-PT MMlb", "Own Sales MMlb"]]
+        pt = [["PT"], [], ["Mes cierre", "Not Assigned", "Assigned", "In-Transit", "Warehouse", "Consignment / SS"]]
+        for m in ("Ene-26", "Feb-26", "Mar-26"):
+            fis.append([m, 30.0, 20.0, 10.0, 9.0])
+            pt.append([m, 4.0, 4.0, 9.0, 3.0, 0.0])
+        ciclo = [[], [], ["Etapa", "Días actuales"], ["Asignado/preparación despacho", 10],
+                 ["Tránsito a destino", 30], ["Bodega destino", 5]]
+        sup = [["S"], [], ["Variable", "Valor"], ["Stock spot en bodegas", 1.0], ["Buffer stock en bodegas", 0.5],
+               ["% venta que pasa por bodega destino", 80]]
+        r = analyze_aggregate(load_aggregate(_xlsx({"01_Supuestos": sup, "08_Inventario_Fisico": fis,
+                                                     "09_PT_Cobertura": pt, "03_Ciclo_Transito": ciclo})))
+        g = {x.name: x for x in r.groups}
+        d = 9.0 / 30
+        self.assertAlmostEqual(g["Asignado (preparación despacho)"].technical, d * 10)
+        self.assertAlmostEqual(g["In-Transit"].technical, d * 30)
+        self.assertAlmostEqual(g["Bodegas destino + consignación"].technical, d * 0.8 * 5 + 1.5)
+        self.assertTrue(any("spot" in x[1] for x in r.recs))

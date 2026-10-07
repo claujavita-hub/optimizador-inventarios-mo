@@ -68,6 +68,13 @@ def default_stages() -> list[Stage]:
         Stage("proceso", "Proceso productivo", "prept", 7, "Tostación / conversión (WIP)"),
         Stage("pt", "Producto terminado/espera", "pt", 12, "Liberación QA + ciclo de campaña / 2"),
         Stage("despacho", "Despacho/entrega", "despacho", 35, "Preparación + tránsito hasta el cliente (si la carga es propia)"),
+        # Detalle opcional de Despacho/entrega: si se informan los tres, reemplaza a "Despacho/entrega".
+        Stage("prep_despacho", "Asignado/preparación despacho", "despacho_det", 15,
+              "Días desde que el PT se asigna hasta que sale (promedio sobre la venta total)"),
+        Stage("transito_pt", "Tránsito a destino", "despacho_det", 30,
+              "Días de tránsito hasta la bodega destino o el cliente (promedio sobre la venta total)"),
+        Stage("bodega", "Bodega destino", "despacho_det", 10,
+              "Días que el producto regular permanece en bodega destino (sin stock spot ni buffer)"),
     ]
 
 
@@ -81,6 +88,9 @@ class AggParams:
     desv_lt_mp_dias: float = 7.0
     dias_bodega_destino: float = 10.0
     despacho_incluye_bodega: bool = True  # los días de Despacho/entrega incluyen la estadía en bodega destino
+    stock_spot: float = 0.0               # MMlb en bodegas reservadas para ventas spot (decisión comercial)
+    buffer_stock: float = 0.0             # MMlb de buffer / safety stock formal en bodegas
+    pct_venta_bodega: float = 1.0         # fracción de la venta que pasa por bodega destino
     segmentos_independientes: int = 1     # >1 aproxima el efecto mix cliente/SKU/planta sobre el SS
     stock_inicial: float | None = None    # stock total al cierre del mes previo al primero (balance de masa)
     stages: list[Stage] = field(default_factory=default_stages)
@@ -104,6 +114,9 @@ PARAM_HELP = {
     "dias_bodega_destino": "Días de venta a mantener en bodegas de destino",
     "segmentos_independientes": "Nº de segmentos independientes (mix); 1 = demanda agregada",
     "despacho_incluye_bodega": "Los días de Despacho/entrega incluyen la estadía en bodega destino",
+    "stock_spot": "Stock en bodegas reservado para ventas spot (MMlb)",
+    "buffer_stock": "Buffer / safety stock formal en bodegas (MMlb)",
+    "pct_venta_bodega": "Fracción de la venta que pasa por bodega destino",
 }
 
 
@@ -237,7 +250,13 @@ def load_aggregate(source) -> AggData:
             val = to_float(row[1]) if len(row) > 1 else None
             if val is None:
                 continue
-            if "stock_total_inicial" in label or "saldo_inicial" in label:   # no confundir con "Stock inicial habitual"
+            if "stock_spot" in label:
+                p.stock_spot, p.sources["stock_spot"] = val, f"archivo ({ws.title})"
+            elif "buffer_stock" in label:
+                p.buffer_stock, p.sources["buffer_stock"] = val, f"archivo ({ws.title})"
+            elif "venta" in label and "bodega" in label:
+                p.pct_venta_bodega, p.sources["pct_venta_bodega"] = to_fraction(val), f"archivo ({ws.title})"
+            elif "stock_total_inicial" in label or "saldo_inicial" in label:   # no confundir con "Stock inicial habitual"
                 p.stock_inicial, p.sources["stock_inicial"] = val, f"archivo ({ws.title})"
             elif "valor_promedio_por_libra" in label or "precio" in label:
                 p.precio_usd_lb, p.sources["precio_usd_lb"] = val, f"archivo ({ws.title})"
@@ -433,19 +452,35 @@ def analyze_aggregate(data: AggData) -> AggResult:
             grp("PT sin asignar (Not Assigned)", ("pt",), col("not_assigned"), tech(("pt",)), ss_pt,
                         "d x días de liberación + ciclo de campaña + SS de producto terminado"),
         ]
-        if p.despacho_incluye_bodega:
+        policy = p.stock_spot + p.buffer_stock      # stock de política comercial en bodegas, no de flujo
+        split = {"prep_despacho", "transito_pt", "bodega"} <= known
+        if split:
+            bod_days = next(s.days for s in p.stages if s.key == "bodega")
+            groups += [
+                grp("Asignado (preparación despacho)", ("prep_despacho",), col("assigned"),
+                    tech(("prep_despacho",)), 0.0, "d x días desde la asignación hasta la salida"),
+                grp("In-Transit", ("transito_pt",), col("in_transit"), tech(("transito_pt",)), 0.0,
+                    "d x días de tránsito a bodega destino o cliente"),
+                grp("Bodegas destino + consignación", ("bodega",), col("warehouse", "consignment"),
+                    d * p.pct_venta_bodega * bod_days + policy + consig, 0.0,
+                    f"d x {p.pct_venta_bodega:.0%} de la venta x días en bodega + spot {p.stock_spot:.1f} + "
+                    f"buffer {p.buffer_stock:.1f} + consignación {consig:.1f} MMlb"),
+            ]
+        elif p.despacho_incluye_bodega:
             # Despacho/entrega cubre desde la asignación hasta la entrega, incluida la estadía en bodega destino.
+            t = tech(("despacho",))
             groups.append(grp("Despacho: asignado + tránsito + bodegas", ("despacho",),
                               col("assigned", "in_transit", "warehouse", "consignment"),
-                              tech(("despacho",)), 0.0,
-                              "d x días de despacho/entrega (preparación + tránsito + bodega destino)"))
+                              t + policy if t is not None else None, 0.0,
+                              "d x días de despacho/entrega (preparación + tránsito + bodega destino)"
+                              + (f" + spot y buffer {policy:.1f} MMlb" if policy else "")))
         else:
             groups += [
                 grp("Asignado + In-Transit", ("despacho",), col("assigned", "in_transit"), tech(("despacho",)), 0.0,
                     "d x días de preparación + tránsito a cliente"),
                 grp("Bodegas destino + consignación", ("bodega",), col("warehouse", "consignment"),
-                    d * p.dias_bodega_destino + consig if "dias_bodega_destino" in p.sources else None, 0.0,
-                    "d x días de bodega destino + consignación contractual"),
+                    d * p.dias_bodega_destino + consig + policy if "dias_bodega_destino" in p.sources else None, 0.0,
+                    "d x días de bodega destino + consignación contractual + spot y buffer"),
             ]
     else:
         groups.append(grp("Producto terminado", ("pt", "despacho"), col("pt"),
@@ -564,6 +599,13 @@ def _recommendations(r: AggResult) -> list[list]:
                      "destino. La hoja Sensibilidad_SS muestra cómo cambia el SS con servicio, lead time y mix.",
                      None, None])
 
+    if p.stock_spot:
+        cost = p.stock_spot * usd * p.tasa_costo_capital
+        recs.append(["Media", "Stock para ventas spot (decisión comercial)",
+                     f"{p.stock_spot:.1f} MMlb reservados para spot = US${p.stock_spot * usd:,.0f} mm inmovilizados"
+                     + (f", con un costo financiero de US${cost:,.1f} mm/año." if cost else "."),
+                     "Mantenerlo solo si el margen adicional de las ventas spot supera ese costo; revisar el tamaño "
+                     "del stock spot según el volumen spot efectivamente vendido.", None, None])
     it = _avg(x.in_transit for x in r.data.months)
     asg, wh = _avg(x.assigned for x in r.data.months), _avg(x.warehouse for x in r.data.months)
     if p.despacho_incluye_bodega and None not in (it, asg, wh):
@@ -683,6 +725,10 @@ def _action_for(name: str) -> str:
     if name.startswith("Despacho"):
         return ("Despachar según la fecha requerida por el cliente (no antes), revisar tiempos de preparación de "
                 "embarque y ajustar el stock de bodegas destino a días de venta objetivo por mercado.")
+    if name.startswith("Asignado (prep"):
+        return "Acortar el tiempo entre la asignación y el embarque: programar la producción y el despacho contra la fecha de salida."
+    if name.startswith("In-Transit"):
+        return "Embarcar según la fecha requerida en destino (no antes) y revisar rutas y frecuencias navieras."
     if name.startswith("Asignado"):
         return ("Despachar según la fecha requerida por el cliente (no antes), revisar Incoterms y tiempos de "
                 "preparación de embarque.")
