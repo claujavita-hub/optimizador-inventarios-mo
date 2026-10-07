@@ -501,7 +501,15 @@ def _recommendations(r: AggResult) -> list[list]:
                          _action_for(g.name), gap, gap * usd])
         if g.technical is not None:
             tgap = g.actual - g.technical
-            if abs(tgap) >= fd:
+            if g.buffer and g.pipeline is not None and g.pipeline - fd <= g.actual < g.technical:
+                recs.append(["Media", f"{g.name}: cubre el pipeline, sin colchón de seguridad",
+                             f"Promedio {g.actual:.2f} MMlb ({g.actual / fd:.0f} días de {g.flow_label}) = días por etapa "
+                             f"({g.pipeline / fd:.0f}); el modelo sugiere {g.buffer / fd:.0f} días adicionales de "
+                             f"seguridad ({g.buffer:.2f} MMlb), que dependen de la desviación supuesta del lead time.",
+                             "No hay exceso estructural en este grupo. Validar la desviación real del lead time (barra "
+                             "lateral): si las esperas ya actúan como colchón, el nivel actual es el adecuado.",
+                             None, None])
+            elif abs(tgap) >= fd:
                 recs.append(["Alta" if tgap > 0 else "Media",
                              f"{g.name}: {'sobre' if tgap > 0 else 'bajo'} la cobertura técnica",
                              f"Promedio {g.actual:.2f} MMlb ({g.actual / fd:.0f} días de {g.flow_label}) vs técnico "
