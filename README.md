@@ -57,6 +57,10 @@ entrega:
   días reales por etapa, ya sea porque la hoja `Ciclo_Transito` está completa o porque se ingresan en la app.
 - **Flujo de cada grupo:** el PT se mide sobre la venta (Own Sales); el Pre-PT, sobre la **producción mensual**
   (columna `Producción MMlb` de la hoja de inventario físico). Sin producción, el Pre-PT no tiene nivel técnico.
+- **Maquila:** el material de terceros (Tolling Sales, columna `Maquila MMlb`) **no** forma parte del stock propio.
+  Se descuenta de la producción para obtener la producción propia y entra en el balance de masa
+  (producción = venta propia + maquila + variación de stock). El saldo inicial se toma de
+  `Stock total inicial` en la hoja de supuestos.
 - **Sensibilidad del stock de seguridad** frente al nivel de servicio, el lead time y el mix (segmentos independientes).
 - **Recomendaciones:** tendencias como un Pre-PT que crece sin que crezca la venta, un stock que no sigue a la venta,
   el tránsito implícito, la cobertura de la venta del mes siguiente y el valor de un día de cobertura en US$.
