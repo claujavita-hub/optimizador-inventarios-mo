@@ -90,9 +90,12 @@ def aggregate_page(raw: bytes) -> None:
                 stg.days, stg.source = val, "ingresado en la app"
             elif val == 0:
                 stg.source = "sin dato"
-        bod = st.number_input("Días de venta en bodegas destino", 0.0, 120.0, 0.0, 1.0)
-        if bod > 0:
-            p.dias_bodega_destino, p.sources["dias_bodega_destino"] = bod, "ingresado en la app"
+        p.despacho_incluye_bodega = st.toggle("Despacho/entrega incluye la estadía en bodega destino",
+                                              p.despacho_incluye_bodega)
+        if not p.despacho_incluye_bodega:
+            bod = st.number_input("Días de venta en bodegas destino", 0.0, 120.0, 0.0, 1.0)
+            if bod > 0:
+                p.dias_bodega_destino, p.sources["dias_bodega_destino"] = bod, "ingresado en la app"
         p.desv_lt_mp_dias = st.number_input("Desviación LT materia prima (días)", 0.0, 60.0,
                                             float(p.desv_lt_mp_dias), 1.0)
 

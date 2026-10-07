@@ -161,9 +161,15 @@ class AggregateTest(unittest.TestCase):
         self.assertGreater(len(out.getvalue()), 5_000)
 
         r2 = analyze_aggregate(load_aggregate(self._book({"Despacho/entrega": 30})))
-        disp = next(g for g in r2.groups if g.name.startswith("Asignado"))
+        disp = next(g for g in r2.groups if g.name.startswith("Despacho"))   # incluye bodegas destino
         self.assertAlmostEqual(disp.technical, 8.0 / 30 * 30)
-        self.assertIsNotNone(group_table(r2)["rows"][2][7])
+        self.assertAlmostEqual(disp.actual, 4 + 9 + 3 + 0.4)
+        self.assertIsNotNone(group_table(r2)["rows"][2][8])
+        data = load_aggregate(self._book({"Despacho/entrega": 30}))
+        data.params.despacho_incluye_bodega = False
+        names = [g.name for g in analyze_aggregate(data).groups]
+        self.assertIn("Asignado + In-Transit", names)
+        self.assertIn("Bodegas destino + consignación", names)
 
 
 class AggregateProductionTest(unittest.TestCase):

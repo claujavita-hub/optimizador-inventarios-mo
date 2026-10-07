@@ -80,6 +80,7 @@ class AggParams:
     desv_lt_pt_dias: float = 5.0
     desv_lt_mp_dias: float = 7.0
     dias_bodega_destino: float = 10.0
+    despacho_incluye_bodega: bool = True  # los días de Despacho/entrega incluyen la estadía en bodega destino
     segmentos_independientes: int = 1     # >1 aproxima el efecto mix cliente/SKU/planta sobre el SS
     stock_inicial: float | None = None    # stock total al cierre del mes previo al primero (balance de masa)
     stages: list[Stage] = field(default_factory=default_stages)
@@ -102,6 +103,7 @@ PARAM_HELP = {
     "desv_lt_mp_dias": "Desviación del lead time de la materia prima (días)",
     "dias_bodega_destino": "Días de venta a mantener en bodegas de destino",
     "segmentos_independientes": "Nº de segmentos independientes (mix); 1 = demanda agregada",
+    "despacho_incluye_bodega": "Los días de Despacho/entrega incluyen la estadía en bodega destino",
 }
 
 
@@ -430,12 +432,21 @@ def analyze_aggregate(data: AggData) -> AggResult:
         groups += [
             grp("PT sin asignar (Not Assigned)", ("pt",), col("not_assigned"), tech(("pt",)), ss_pt,
                         "d x días de liberación + ciclo de campaña + SS de producto terminado"),
-            grp("Asignado + In-Transit", ("despacho",), col("assigned", "in_transit"), tech(("despacho",)), 0.0,
-                        "d x días de preparación + tránsito a cliente"),
-            grp("Bodegas destino + consignación", ("bodega",), col("warehouse", "consignment"),
-                        d * p.dias_bodega_destino + consig if "dias_bodega_destino" in p.sources else None, 0.0,
-                        "d x días de bodega destino + consignación contractual"),
         ]
+        if p.despacho_incluye_bodega:
+            # Despacho/entrega cubre desde la asignación hasta la entrega, incluida la estadía en bodega destino.
+            groups.append(grp("Despacho: asignado + tránsito + bodegas", ("despacho",),
+                              col("assigned", "in_transit", "warehouse", "consignment"),
+                              tech(("despacho",)), 0.0,
+                              "d x días de despacho/entrega (preparación + tránsito + bodega destino)"))
+        else:
+            groups += [
+                grp("Asignado + In-Transit", ("despacho",), col("assigned", "in_transit"), tech(("despacho",)), 0.0,
+                    "d x días de preparación + tránsito a cliente"),
+                grp("Bodegas destino + consignación", ("bodega",), col("warehouse", "consignment"),
+                    d * p.dias_bodega_destino + consig if "dias_bodega_destino" in p.sources else None, 0.0,
+                    "d x días de bodega destino + consignación contractual"),
+            ]
     else:
         groups.append(grp("Producto terminado", ("pt", "despacho"), col("pt"),
                                   tech(("pt", "despacho"), d * p.dias_bodega_destino), ss_pt,
@@ -554,6 +565,13 @@ def _recommendations(r: AggResult) -> list[list]:
                      None, None])
 
     it = _avg(x.in_transit for x in r.data.months)
+    asg, wh = _avg(x.assigned for x in r.data.months), _avg(x.warehouse for x in r.data.months)
+    if p.despacho_incluye_bodega and None not in (it, asg, wh):
+        recs.append(["Media", "Dónde están los días de despacho",
+                     f"Del bloque de despacho, Assigned = {asg / d:.0f} días, In-Transit = {it / d:.0f} días y "
+                     f"Warehouse = {wh / d:.0f} días de venta (promedio).",
+                     "La mayor parte del tiempo está entre la asignación y la llegada (preparación + tránsito), no "
+                     "en las bodegas: es la palanca principal para reducir días de despacho.", None, None])
     if it:
         recs.append(["Media", "Tránsito implícito",
                      f"In-Transit promedio {it:.2f} MMlb = {it / d:.0f} días de venta: si todo es propio, el "
@@ -662,6 +680,9 @@ def _action_for(name: str) -> str:
     if name.startswith("PT sin asignar"):
         return ("Producir contra pedidos/pronóstico (campañas más cortas), acelerar la liberación QA y asignar el "
                 "stock sin destino a contratos o venta spot.")
+    if name.startswith("Despacho"):
+        return ("Despachar según la fecha requerida por el cliente (no antes), revisar tiempos de preparación de "
+                "embarque y ajustar el stock de bodegas destino a días de venta objetivo por mercado.")
     if name.startswith("Asignado"):
         return ("Despachar según la fecha requerida por el cliente (no antes), revisar Incoterms y tiempos de "
                 "preparación de embarque.")
