@@ -162,6 +162,8 @@ class AggData:
     skus: list[SkuRow]
     warnings: list[str]
     title: str = ""
+    partial: list[MonthRow] = field(default_factory=list)   # meses sin stock total u Own Sales (no se analizan)
+    celonis: object | None = None                            # detalle por lote (celonis.CelonisData), si existe
 
 
 def is_aggregate_workbook(source) -> bool:
@@ -323,12 +325,23 @@ def load_aggregate(source) -> AggData:
             r.prept = r.total - r.pt
         if r.next_sales is None and i + 1 < len(rows) and r.not_assigned is not None:
             r.next_sales = rows[i + 1].sales
+    # Meses parciales (p. ej. solo PT informado): se muestran aparte y no entran a promedios ni coberturas.
+    partial = [r for r in rows if r.total is None or r.sales is None]
+    if partial and len(partial) < len(rows):
+        rows = [r for r in rows if r not in partial]
+        warnings.append(f"Meses con datos parciales excluidos del análisis: {', '.join(r.label for r in partial)} "
+                        "(falta stock total u Own Sales).")
+    else:
+        partial = []
     if rows and not any(r.production is not None for r in rows):
         warnings.append("Sin producción mensual (columna 'Producción MMlb' de la hoja de inventario físico): "
                         "no se calcula la cobertura técnica del Pre-PT y sus días se expresan sobre la venta.")
     if not rows:
         warnings.append("No hay meses con datos.")
-    return AggData(rows, p, skus, warnings, title)
+    from .celonis import load_celonis
+    if hasattr(source, "seek"):
+        source.seek(0)
+    return AggData(rows, p, skus, warnings, title, partial, load_celonis(source))
 
 
 # ---------------------------------------------------------------- cálculo
@@ -509,7 +522,17 @@ def analyze_aggregate(data: AggData) -> AggResult:
     res = AggResult(data, d_month, sd_month, groups, ss_pt, ss_mp, stats)
     res.sku_rows = _sku_table(data)
     res.recs = _recommendations(res)
+    if data.celonis is not None:
+        from .celonis import insights
+        res.recs += insights(data.celonis, latest_pt_month(data))
     return res
+
+
+def latest_pt_month(data: AggData):
+    """Último mes con apertura de PT (incluye meses parciales: sirve para conciliar el corte de Celonis)."""
+    months = sorted(data.months + data.partial, key=lambda m: m.month)
+    with_split = [m for m in months if m.not_assigned is not None]
+    return with_split[-1] if with_split else None
 
 
 def _sku_table(data: AggData) -> list[list]:
@@ -892,6 +915,19 @@ def write_aggregate_report(r: AggResult, path) -> None:
         ws = wb.create_sheet("Cliente_SKU")
         _table(ws, 1, tb["headers"], tb["rows"], tb["fmts"])
         _widths(ws, {1: 24, 2: 18})
+
+    if r.data.celonis is not None:
+        from . import celonis as cz
+        c = r.data.celonis
+        for name, tb in (("Celonis_Mercado", cz.stage_market_table(c)), ("Celonis_Material", cz.material_table(c)),
+                         ("Celonis_Planta", cz.plant_table(c)), ("Celonis_Bodegas", cz.warehouse_table(c)),
+                         ("Celonis_Conciliacion", cz.reconciliation_table(c, latest_pt_month(r.data)))):
+            ws = wb.create_sheet(name)
+            nxt = _table(ws, 1, tb["headers"], tb["rows"], tb["fmts"])
+            _widths(ws, {1: 44, 2: 16, 5: 30})
+            if name == "Celonis_Conciliacion":
+                ws.cell(nxt, 1, "Celonis es una foto por lote del producto terminado: desagrega el PT del dashboard, "
+                                "no se suma a él.").font = Font(italic=True, size=9)
 
     ws = wb.create_sheet("Supuestos")
     p = r.data.params

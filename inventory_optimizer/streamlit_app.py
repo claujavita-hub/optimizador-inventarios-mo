@@ -118,8 +118,14 @@ def aggregate_page(raw: bytes) -> None:
     ag.write_aggregate_report(r, buf)
     st.download_button("Descargar reporte Excel", buf.getvalue(), "reporte_rotacion_agregado.xlsx", type="primary")
 
-    tabs = st.tabs(["Resumen", "Recomendaciones", "Rotación mensual", "Etapas", "Sensibilidad SS",
-                    f"Advertencias ({len(data.warnings)})"])
+    names = ["Resumen", "Recomendaciones", "Rotación mensual", "Etapas", "Sensibilidad SS",
+             f"Advertencias ({len(data.warnings)})"]
+    if data.celonis is not None:
+        names.append("Detalle Celonis")
+    tabs = st.tabs(names)
+    if data.celonis is not None:
+        with tabs[6]:
+            celonis_view(data.celonis, ag.latest_pt_month(data))
     with tabs[0]:
         st.dataframe(pd.DataFrame(ag.kpis(r), columns=["Indicador", "Actual", "Demostrado (P25)", "Técnico"]),
                      hide_index=True, width="stretch")
@@ -158,6 +164,32 @@ def aggregate_page(raw: bytes) -> None:
             st.warning(w)
 
 
+def celonis_view(c, month=None) -> None:
+    from inventory_optimizer import celonis as cz
+
+    st.caption(f"Foto por lote del producto terminado ({len(c.lots)} lotes, {c.total:.2f} MMlb). Desagrega el PT, "
+               "no se suma al stock del dashboard.")
+    st.subheader("Por mercado y etapa")
+    st.dataframe(df(cz.stage_market_table(c)), hide_index=True, width="stretch")
+    st.subheader("Conciliación con el dashboard")
+    st.dataframe(df(cz.reconciliation_table(c, month)), hide_index=True, width="stretch")
+    col = st.columns(2)
+    with col[0]:
+        st.subheader("Por material")
+        st.dataframe(df(cz.material_table(c)), hide_index=True, width="stretch")
+    with col[1]:
+        st.subheader("Por planta")
+        st.dataframe(df(cz.plant_table(c)), hide_index=True, width="stretch")
+    st.subheader("Bodegas externas")
+    st.dataframe(df(cz.warehouse_table(c)), hide_index=True, width="stretch")
+    for rec in cz.insights(c, month):
+        with st.expander(f"{ {'Alta': '🔴', 'Media': '🟠', 'Baja': '🔵'}[rec[0]] } {rec[1]}"):
+            st.write(f"**Diagnóstico:** {rec[2]}")
+            st.write(f"**Acción:** {rec[3]}")
+    for w in c.warnings:
+        st.warning(w)
+
+
 def fmt(v, kind="n"):
     if v is None:
         return "s/d"
@@ -169,6 +201,14 @@ def fmt(v, kind="n"):
 def df(tb: dict) -> pd.DataFrame:
     return pd.DataFrame(tb["rows"], columns=tb["headers"])
 
+
+from inventory_optimizer.celonis import is_celonis_only, load_celonis  # noqa: E402
+
+if is_celonis_only(io.BytesIO(source)):
+    st.info("Archivo de Celonis (detalle por lote). Para cruzarlo con la rotación, súbelo dentro del modelo "
+            "(hoja 11_Celonis_Detalle) o sube el modelo completo.")
+    celonis_view(load_celonis(io.BytesIO(source)))
+    st.stop()
 
 if is_aggregate_workbook(io.BytesIO(source)):
     aggregate_page(source)

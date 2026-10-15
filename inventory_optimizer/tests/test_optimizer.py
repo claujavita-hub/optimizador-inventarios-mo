@@ -244,3 +244,24 @@ class DespachoDetalleTest(unittest.TestCase):
         self.assertAlmostEqual(g["In-Transit"].technical, d * 30)
         self.assertAlmostEqual(g["Bodegas destino + consignación"].technical, d * 0.8 * 5 + 1.5)
         self.assertTrue(any("spot" in x[1] for x in r.recs))
+
+
+class CelonisTest(unittest.TestCase):
+    def _export(self):
+        rows = [["Market", "Stage", "Plant", "Warehouse", "Material", "Batch", "Inventory (Qty.)"],
+                ["Asia", "Transit", "M012", "Transito", "2021 - TMO", "A1", 3_000_000],
+                ["India", "Transit", "M012", "Transito", "2021 - TMO", "A2", 2_000_000],
+                ["Europe", "Ext.WH", "M012", "St Rotterdam", "2016 - FeMo", "A3", 1_000_000],
+                ["Not Assigned", "Plant", "M042", "Planta", "2016 - FeMo", "A4", None]]
+        return _xlsx({"Sheet1": rows})
+
+    def test_export_alone(self):
+        from inventory_optimizer import celonis as cz
+        src = self._export()
+        self.assertTrue(cz.is_celonis_only(src))
+        c = cz.load_celonis(src)
+        self.assertAlmostEqual(c.total, 6.0)
+        self.assertEqual(c.missing_qty, 1)
+        tb = cz.stage_market_table(c)
+        self.assertAlmostEqual(tb["rows"][-1][2], 5.0)        # tránsito total
+        self.assertTrue(any("Tránsito" in x[1] for x in cz.insights(c)))

@@ -61,6 +61,12 @@ entrega:
   Se descuenta de la producción para obtener la producción propia y entra en el balance de masa
   (producción = venta propia + maquila + variación de stock). El saldo inicial se toma de
   `Stock total inicial` en la hoja de supuestos.
+- **Detalle Celonis:** si el libro trae la hoja `11_Celonis_Detalle` (o se sube el export crudo de Celonis con
+  Market, Stage, Plant, Warehouse, Material, Batch, Inventory), la app resume el producto terminado por mercado,
+  etapa, material, planta y bodega, y lo concilia con la apertura de PT del último mes. Es una foto que
+  desagrega el PT: no se suma al stock.
+- **Meses parciales:** un mes sin stock total u Own Sales (por ejemplo, solo PT) se excluye de promedios y
+  coberturas y se usa solo como referencia (conciliación con Celonis).
 - **Sensibilidad del stock de seguridad** frente al nivel de servicio, el lead time y el mix (segmentos independientes).
 - **Recomendaciones:** tendencias como un Pre-PT que crece sin que crezca la venta, un stock que no sigue a la venta,
   el tránsito implícito, la cobertura de la venta del mes siguiente y el valor de un día de cobertura en US$.
