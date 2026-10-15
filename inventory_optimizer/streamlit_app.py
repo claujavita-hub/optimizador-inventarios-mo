@@ -125,7 +125,7 @@ def aggregate_page(raw: bytes) -> None:
     tabs = st.tabs(names)
     if data.celonis is not None:
         with tabs[6]:
-            celonis_view(data.celonis, ag.latest_pt_month(data))
+            celonis_view(data.celonis, ag.latest_pt_month(data), data.sales_market)
     with tabs[0]:
         st.dataframe(pd.DataFrame(ag.kpis(r), columns=["Indicador", "Actual", "Demostrado (P25)", "Técnico"]),
                      hide_index=True, width="stretch")
@@ -164,13 +164,16 @@ def aggregate_page(raw: bytes) -> None:
             st.warning(w)
 
 
-def celonis_view(c, month=None) -> None:
+def celonis_view(c, month=None, sales=None) -> None:
     from inventory_optimizer import celonis as cz
 
     st.caption(f"Foto por lote del producto terminado ({len(c.lots)} lotes, {c.total:.2f} MMlb). Desagrega el PT, "
                "no se suma al stock del dashboard.")
     st.subheader("Por mercado y etapa")
     st.dataframe(df(cz.stage_market_table(c)), hide_index=True, width="stretch")
+    if sales:
+        st.subheader("Días de venta en tránsito y en bodega, por mercado")
+        st.dataframe(df(cz.transit_days_table(c, sales)), hide_index=True, width="stretch")
     st.subheader("Conciliación con el dashboard")
     st.dataframe(df(cz.reconciliation_table(c, month)), hide_index=True, width="stretch")
     col = st.columns(2)
@@ -182,7 +185,7 @@ def celonis_view(c, month=None) -> None:
         st.dataframe(df(cz.plant_table(c)), hide_index=True, width="stretch")
     st.subheader("Bodegas externas")
     st.dataframe(df(cz.warehouse_table(c)), hide_index=True, width="stretch")
-    for rec in cz.insights(c, month):
+    for rec in cz.insights(c, month, sales):
         with st.expander(f"{ {'Alta': '🔴', 'Media': '🟠', 'Baja': '🔵'}[rec[0]] } {rec[1]}"):
             st.write(f"**Diagnóstico:** {rec[2]}")
             st.write(f"**Acción:** {rec[3]}")

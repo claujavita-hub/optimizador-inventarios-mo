@@ -164,6 +164,7 @@ class AggData:
     title: str = ""
     partial: list[MonthRow] = field(default_factory=list)   # meses sin stock total u Own Sales (no se analizan)
     celonis: object | None = None                            # detalle por lote (celonis.CelonisData), si existe
+    sales_market: dict = field(default_factory=dict)        # venta promedio por mercado (MMlb/mes), si existe
 
 
 def is_aggregate_workbook(source) -> bool:
@@ -294,7 +295,7 @@ def load_aggregate(source) -> AggData:
     skus: list[SkuRow] = []
     ws = _sheet(wb, "cliente_sku")
     if ws:
-        hdr, body = _header_rows(ws, ("cliente", "sku"))
+        hdr, body = _header_rows(ws, ("cliente", "sku", "ventas"))   # el título también dice "cliente / SKU"
         if hdr:
             ix = dict(v=_col(hdr, "ventas"), sd=_col(hdr, "desv_demanda"), lt=_col(hdr, "lt_dias"),
                       sdlt=_col(hdr, "desv_lt"), sl=_col(hdr, "servicio"), ss=_col(hdr, "ss_real"),
@@ -338,10 +339,10 @@ def load_aggregate(source) -> AggData:
                         "no se calcula la cobertura técnica del Pre-PT y sus días se expresan sobre la venta.")
     if not rows:
         warnings.append("No hay meses con datos.")
-    from .celonis import load_celonis
+    from .celonis import load_celonis, load_sales_by_market
     if hasattr(source, "seek"):
         source.seek(0)
-    return AggData(rows, p, skus, warnings, title, partial, load_celonis(source))
+    return AggData(rows, p, skus, warnings, title, partial, load_celonis(source), load_sales_by_market(source))
 
 
 # ---------------------------------------------------------------- cálculo
@@ -425,6 +426,12 @@ def analyze_aggregate(data: AggData) -> AggResult:
     z = NormalDist().inv_cdf(min(max(p.nivel_servicio, 0.5), 0.9999))
     seg = max(int(p.segmentos_independientes), 1)
     ss_pt = safety(z, p.lt_reposicion_pt_dias, sd_d, d, p.desv_lt_pt_dias, seg)
+    # Si 02_Cliente_SKU trae filas por familia (Cliente = "Todos"), el SS de PT es la suma por familia:
+    # recoge el efecto mix que el cálculo agregado no ve.
+    fam = [x for x in _sku_table(data) if norm(x[0]) == "todos"]
+    ss_pt_source = "agregado"
+    if fam:
+        ss_pt, ss_pt_source = sum(x[9] for x in fam) / 1e6, f"suma de {len(fam)} familias (02_Cliente_SKU)"
     ss_mp = safety(z, p.lt_mp(), sd_d, d, p.desv_lt_mp_dias, seg)
     known = {s.key for s in p.stages if s.known}
 
@@ -463,7 +470,7 @@ def analyze_aggregate(data: AggData) -> AggResult:
         consig = _avg(m.consignment for m in data.months) or 0.0
         groups += [
             grp("PT sin asignar (Not Assigned)", ("pt",), col("not_assigned"), tech(("pt",)), ss_pt,
-                        "d x días de liberación + ciclo de campaña + SS de producto terminado"),
+                        f"d x días de liberación + SS de producto terminado ({ss_pt_source})"),
         ]
         policy = p.stock_spot + p.buffer_stock      # stock de política comercial en bodegas, no de flujo
         split = {"prep_despacho", "transito_pt", "bodega"} <= known
@@ -524,7 +531,7 @@ def analyze_aggregate(data: AggData) -> AggResult:
     res.recs = _recommendations(res)
     if data.celonis is not None:
         from .celonis import insights
-        res.recs += insights(data.celonis, latest_pt_month(data))
+        res.recs += insights(data.celonis, latest_pt_month(data), data.sales_market)
     return res
 
 
@@ -680,7 +687,8 @@ def _recommendations(r: AggResult) -> list[list]:
                      "saber si su stock corresponde a los días de compra, tránsito, puerto, espera y proceso.",
                      "Completar la columna 'Producción MMlb' de la hoja 08_Inventario_Fisico (una cifra por mes).",
                      None, None])
-    missing = [s.name for s in p.stages if not s.known]
+    desp_known = any(s.key == "despacho" and s.known for s in p.stages)
+    missing = [s.name for s in p.stages if not s.known and not (s.group == "despacho_det" and desp_known)]
     if missing:
         recs.append(["Media", "Completar días por etapa (03_Ciclo_Transito)",
                      f"Sin días reales para: {', '.join(missing)}. Sin ellos no se calcula la cobertura técnica "
@@ -921,7 +929,9 @@ def write_aggregate_report(r: AggResult, path) -> None:
         c = r.data.celonis
         for name, tb in (("Celonis_Mercado", cz.stage_market_table(c)), ("Celonis_Material", cz.material_table(c)),
                          ("Celonis_Planta", cz.plant_table(c)), ("Celonis_Bodegas", cz.warehouse_table(c)),
-                         ("Celonis_Conciliacion", cz.reconciliation_table(c, latest_pt_month(r.data)))):
+                         ("Celonis_Conciliacion", cz.reconciliation_table(c, latest_pt_month(r.data))),
+                         *((("Celonis_Dias_Mercado", cz.transit_days_table(c, r.data.sales_market)),)
+                           if r.data.sales_market else ())):
             ws = wb.create_sheet(name)
             nxt = _table(ws, 1, tb["headers"], tb["rows"], tb["fmts"])
             _widths(ws, {1: 44, 2: 16, 5: 30})

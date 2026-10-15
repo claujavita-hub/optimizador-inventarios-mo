@@ -65,6 +65,11 @@ entrega:
   Market, Stage, Plant, Warehouse, Material, Batch, Inventory), la app resume el producto terminado por mercado,
   etapa, material, planta y bodega, y lo concilia con la apertura de PT del último mes. Es una foto que
   desagrega el PT: no se suma al stock.
+- **Ventas por mercado:** si el libro trae una hoja de ventas (p. ej. `15_Ventas_ZSD120`) con una tabla
+  "Mercado | ... | Promedio MMlb/mes", la app calcula los días de venta que representan el tránsito y las bodegas
+  de cada mercado (foto Celonis ÷ venta mensual).
+- **Stock de seguridad por familia:** si `02_Cliente_SKU` trae filas con Cliente = "Todos" (una por familia), el
+  SS de producto terminado es la suma por familia (incluye el efecto mix) en vez del cálculo agregado.
 - **Meses parciales:** un mes sin stock total u Own Sales (por ejemplo, solo PT) se excluye de promedios y
   coberturas y se usa solo como referencia (conciliación con Celonis).
 - **Sensibilidad del stock de seguridad** frente al nivel de servicio, el lead time y el mix (segmentos independientes).

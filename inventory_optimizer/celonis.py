@@ -110,6 +110,46 @@ def load_celonis(source) -> CelonisData | None:
             source.seek(0)
 
 
+def load_sales_by_market(source) -> dict[str, float]:
+    """Promedio de venta mensual por mercado (MMlb/mes) desde una hoja de ventas (p. ej. 15_Ventas_ZSD120)."""
+    wb = load_workbook(source, data_only=True, read_only=True)
+    try:
+        for name in wb.sheetnames:
+            if "ventas" not in norm(name):
+                continue
+            rows = list(wb[name].iter_rows(values_only=True))
+            for i, row in enumerate(rows):
+                hdr = [norm(c) if c is not None else "" for c in row]
+                if hdr and hdr[0] == "mercado" and any(h.startswith("promedio") for h in hdr):
+                    j = next(k for k, h in enumerate(hdr) if h.startswith("promedio"))
+                    out = {}
+                    for r in rows[i + 1:]:
+                        if not r or not r[0]:
+                            break
+                        v = to_float(r[j]) if j < len(r) else None
+                        if v is not None:
+                            out[str(r[0])] = v
+                    return out
+        return {}
+    finally:
+        wb.close()
+        if hasattr(source, "seek"):
+            source.seek(0)
+
+
+def transit_days_table(c: CelonisData, sales: dict[str, float]) -> dict:
+    """Días de venta de cada mercado que representan su tránsito y su bodega (foto Celonis / venta mensual)."""
+    mk = c.by("market", "stage")
+    rows = []
+    for m, v in sorted(sales.items(), key=lambda x: -x[1]):
+        tr, wh = mk.get((m, "Transit"), 0.0), mk.get((m, "Ext.WH"), 0.0)
+        d = v / 30 if v else 0
+        rows.append([m, v, tr, tr / d if d else None, wh, wh / d if d else None])
+    return dict(headers=["Mercado", "Venta MMlb/mes", "Tránsito MMlb", "Días de venta en tránsito",
+                         "Bodega externa MMlb", "Días de venta en bodega"],
+                rows=rows, fmts=[None, "0.00", "0.00", "0", "0.00", "0"])
+
+
 def is_celonis_only(source) -> bool:
     wb = load_workbook(source, read_only=True)
     names = [norm(n) for n in wb.sheetnames]
@@ -187,7 +227,7 @@ def reconciliation_table(c: CelonisData, month) -> dict:
                 rows=rows, fmts=[None, "0.00", "0.00", "0.00", None])
 
 
-def insights(c: CelonisData, month=None, sales_month: float | None = None) -> list[list]:
+def insights(c: CelonisData, month=None, sales: dict[str, float] | None = None) -> list[list]:
     """Lecturas principales en el mismo formato que las recomendaciones del modo agregado."""
     out: list[list] = []
     tot = c.total or 1
@@ -210,6 +250,20 @@ def insights(c: CelonisData, month=None, sales_month: float | None = None) -> li
                             f"{v:.2f} MMlb en tránsito vs {wh:.2f} MMlb en bodega ({v / wh:.0f} veces).",
                             "Revisar si los embarques a este mercado salen con más anticipación de la necesaria o "
                             "si se vende en destino directo desde el barco.", None, None])
+    if sales:
+        for m, v, tr, dtr, wh, dwh in transit_days_table(c, sales)["rows"]:
+            if dtr and dtr > 60:
+                out.append(["Alta", f"{m}: {dtr:.0f} días de venta en tránsito",
+                            f"Tránsito {tr:.2f} MMlb vs venta de {v:.2f} MMlb/mes: el tránsito cubre {dtr:.0f} días de "
+                            f"venta del mercado (bodega: {dwh or 0:.0f} días).",
+                            "Validar si ese tránsito corresponde a ventas de este mercado o a reposición de bodegas que "
+                            "abastecen otros; revisar ETA, fecha requerida por el cliente y lotes con más antigüedad.",
+                            None, None])
+            elif dwh and dwh > 30:
+                out.append(["Media", f"{m}: {dwh:.0f} días de venta en bodegas",
+                            f"Bodegas {wh:.2f} MMlb vs venta de {v:.2f} MMlb/mes ({dwh:.0f} días).",
+                            "Revisar el nivel objetivo de las bodegas del mercado y la frecuencia de reposición.",
+                            None, None])
     mats = sorted(((m, v) for (m,), v in c.by("material").items()), key=lambda x: -x[1])
     if mats:
         m, v = mats[0]
