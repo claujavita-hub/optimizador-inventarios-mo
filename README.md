@@ -76,6 +76,26 @@ entrega:
 - **Recomendaciones:** tendencias como un Pre-PT que crece sin que crezca la venta, un stock que no sigue a la venta,
   el tránsito implícito, la cobertura de la venta del mes siguiente y el valor de un día de cobertura en US$.
 
+## Tablero de solvencia y liquidez
+
+Segundo archivo opcional en la barra lateral ("Tablero de solvencia y liquidez"), con las hojas
+`Tablero` (datos de entrada por período: EBITDA 12m, gastos financieros, deuda total y de corto plazo,
+caja, activo y pasivo corriente, inventario, pasivo total, patrimonio, costo de ventas 12m, flujo
+operacional, capex, dividendos) y `Umbrales` (límites verde/amarillo por indicador y covenant
+deuda neta/EBITDA). La app recalcula los 9 indicadores con las mismas fórmulas del tablero y agrega
+la pestaña **Solvencia**:
+
+- Acciones de inventario cuantificadas desde el análisis (exceso de Pre-PT reciente, bodegas y
+  tránsito por mercado vs días objetivo, safety stock por cliente sobre el teórico, asignado
+  esperando despacho, stock spot). Se marcan o desmarcan y se pueden editar sus MMlb.
+- Liberación en US$ mm = MMlb x valor por libra (editable; usar el valor contable si el inventario
+  del balance está a costo). La caja se mantiene en caja o se usa para pagar deuda.
+- Indicadores antes/después con semáforo, ahorro de intereses y la liberación necesaria para que
+  cada indicador amarillo o rojo pase a verde. Descarga `escenario_solvencia.xlsx`.
+
+El flujo libre suma la liberación una sola vez (caja de única vez, no flujo recurrente). Si se sube
+solo el tablero, la app muestra los indicadores y semáforos sin acciones.
+
 ## Excel de entrada (modo detallado)
 
 | Hoja | Contenido | ¿Obligatoria? |

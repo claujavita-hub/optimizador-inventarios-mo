@@ -265,3 +265,44 @@ class CelonisTest(unittest.TestCase):
         tb = cz.stage_market_table(c)
         self.assertAlmostEqual(tb["rows"][-1][2], 5.0)        # tránsito total
         self.assertTrue(any("Tránsito" in x[1] for x in cz.insights(c)))
+
+
+class SolvencyTest(unittest.TestCase):
+    """Tablero de solvencia ficticio con la estructura Tablero/Umbrales."""
+
+    def _book(self):
+        labels = ["EBITDA últimos 12 meses", "Gastos financieros netos 12m", "Deuda financiera total",
+                  "Deuda financiera corto plazo", "Caja y depósitos", "Activo corriente", "Inventario corriente",
+                  "Pasivo corriente", "Pasivo total", "Patrimonio", "Costo de ventas 12m",
+                  "Flujo operacional acumulado", "Capex acumulado", "Dividendos acumulados"]
+        vals = [200, 25, 600, 50, 100, 1500, 1000, 500, 1200, 1000, 2400, -40, 10, 50]
+        tab = [["Tablero"], [], [], [], ["Datos de entrada", "P1", "P2"]]
+        tab += [[l, v, None] for l, v in zip(labels, vals)]
+        umb = [["Umbrales"], [], [], ["Indicador", "Criterio", "Verde", "Amarillo"],
+               ["Días de inventario", "Menor es mejor", 140, 170], [], ["Covenant", None, 3.5]]
+        return _xlsx({"Tablero": tab, "Umbrales": umb})
+
+    def test_indicators_and_scenario(self):
+        from inventory_optimizer.solvency import indicators, load_tablero, scenario_table, thresholds_needed
+        t = load_tablero(self._book())
+        self.assertEqual(t.latest, "P1")
+        self.assertEqual(t.covenant, 3.5)
+        d = t.periods["P1"]
+        base = indicators(d, t.covenant)
+        self.assertAlmostEqual(base["nd_ebitda"], 2.5)
+        self.assertAlmostEqual(base["acida"], 1.0)
+        self.assertAlmostEqual(base["dias_inventario"], 1000 / 2400 * 365)
+        self.assertAlmostEqual(base["holgura"], 1 - 500 / 700)
+        sim = indicators(d, t.covenant, 100)
+        self.assertAlmostEqual(sim["nd_ebitda"], 2.0)
+        self.assertAlmostEqual(sim["acida"], 1.2)
+        self.assertAlmostEqual(sim["flujo_libre"], 0)
+        paid = indicators(d, t.covenant, 100, "deuda")
+        self.assertAlmostEqual(paid["nd_ebitda"], 2.0)
+        self.assertAlmostEqual(paid["liquidez"], 1400 / 450)
+        th = next(x for x in t.thresholds if x.key == "dias_inventario")
+        self.assertEqual((th.green, th.yellow), (140, 170))
+        self.assertEqual(th.color(base["dias_inventario"]), "Amarillo")
+        need = {n[0]: n[3] for n in thresholds_needed(t, "P1")}
+        self.assertEqual(need["Días de inventario"], 80)   # 1000-x <= 140*2400/365 = 920.5
+        self.assertEqual(len(scenario_table(t, "P1", 50)["rows"]), 10)

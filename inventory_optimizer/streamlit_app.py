@@ -54,22 +54,116 @@ def sample_bytes() -> bytes:
 with st.sidebar:
     st.header("Datos")
     upload = st.file_uploader("Excel de entrada", type=["xlsx", "xlsm"])
+    upload_tab = st.file_uploader("Tablero de solvencia y liquidez (opcional)", type=["xlsx", "xlsm"],
+                                  help="Hojas Tablero y Umbrales. Con él la app calcula el impacto de cada acción "
+                                       "de inventario en deuda neta/EBITDA, covenant, días de inventario y liquidez.")
     use_sample = upload is None and st.toggle("Sin archivo: usar caso de ejemplo", value=True)
     st.download_button("Descargar plantilla vacía", template_bytes(), "plantilla_inventarios_mo.xlsx")
     st.download_button("Descargar caso de ejemplo", sample_bytes(), "ejemplo_inventarios_mo.xlsx")
 
 source = upload.getvalue() if upload is not None else sample_bytes() if use_sample else None
-if source is None:
+tablero_raw = upload_tab.getvalue() if upload_tab is not None else None
+if source is None and tablero_raw is None:
     st.info("Sube tu Excel (o activa el caso de ejemplo). La plantilla explica cada hoja y columna; "
             "solo la hoja Demanda es indispensable.")
     st.stop()
 
 
 
-def aggregate_page(raw: bytes) -> None:
+def load_tab(*raws):
+    from inventory_optimizer.solvency import load_tablero
+
+    for raw in raws:
+        if raw:
+            try:
+                tab = load_tablero(io.BytesIO(raw))
+            except Exception as exc:   # archivo que no es un tablero
+                st.sidebar.warning(f"No pude leer el tablero de solvencia: {exc}")
+                continue
+            if tab is not None and tab.latest:
+                return tab
+    return None
+
+
+def solvency_view(tab, r=None) -> None:
+    """Tablero de solvencia y, si hay análisis de inventario, el impacto de las acciones."""
+    from inventory_optimizer import solvency as sv
+
+    periods = [p for p, v in tab.periods.items() if v.get("ebitda") is not None and v.get("deuda") is not None]
+    c = st.columns(3)
+    period = c[0].selectbox("Período del tablero", periods, index=len(periods) - 1)
+    price = r.data.params.precio_usd_lb if r is not None else 33.0
+    value_lb = c[1].number_input("Valor del inventario (US$/lb)", 1.0, 200.0, float(price), 0.5,
+                                 help="Por defecto el valor promedio por libra de 01_Supuestos. Si el inventario "
+                                      "del balance está a costo, usa el valor contable por libra.")
+    use = c[2].radio("Uso de la caja liberada", ["Mantener en caja", "Pagar deuda"], horizontal=True)
+    use = "deuda" if use == "Pagar deuda" else "caja"
+
+    actions: list = []
+    if r is not None:
+        st.subheader("Acciones de inventario")
+        c = st.columns(3)
+        t_tr = c[0].number_input("Días objetivo de tránsito por mercado", 10.0, 120.0, 45.0, 5.0)
+        t_bod = c[1].number_input("Días objetivo en bodegas por mercado", 5.0, 90.0, 20.0, 5.0)
+        t_asg = c[2].number_input("Días objetivo de asignado esperando despacho", 2.0, 30.0, 10.0, 1.0)
+        acts = sv.inventory_actions(r, t_tr, t_bod, t_asg)
+        if not acts:
+            st.info("El análisis no encontró acciones cuantificables con los datos actuales.")
+        ed = st.data_editor(pd.DataFrame([[a.default, a.code, a.name, a.mmlb, a.usd(value_lb), a.status, a.basis]
+                                          for a in acts],
+                                         columns=["Incluir", "Código", "Acción", "MMlb", "US$ mm", "Estado",
+                                                  "Base del cálculo"]),
+                            hide_index=True, width="stretch", disabled=["Código", "Acción", "US$ mm", "Estado",
+                                                                        "Base del cálculo"],
+                            column_config={"MMlb": st.column_config.NumberColumn(format="%.2f", min_value=0.0),
+                                           "US$ mm": st.column_config.NumberColumn(format="%.1f")},
+                            key=f"acts_{len(acts)}")
+        for a, (_, row) in zip(acts, ed.iterrows()):
+            if row["Incluir"]:
+                a.mmlb = float(row["MMlb"])
+                actions.append(a)
+        st.caption("Marcadas por defecto: acciones con datos validados. Tránsito, asignado y spot quedan sin marcar "
+                   "hasta validarlas. Puedes editar las MMlb de cada acción.")
+    release = sv.actions_release(actions, value_lb)
+    extra = st.number_input("Otra liberación de capital de trabajo (US$ mm)", 0.0, 2000.0, 0.0, 5.0,
+                            help="Por ejemplo, cobranza o proveedores. Se suma a las acciones de inventario.")
+    release += extra
+    rate = r.data.params.tasa_costo_capital if r is not None else 0.08
+    m = st.columns(4)
+    base = sv.indicators(tab.periods[period], tab.covenant)
+    sim = sv.indicators(tab.periods[period], tab.covenant, release, use)
+    m[0].metric("Liberación total", f"US$ {release:,.0f} mm")
+    m[1].metric("Deuda neta / EBITDA", sv.fmt("nd_ebitda", sim["nd_ebitda"]),
+                f"{sim['nd_ebitda'] - base['nd_ebitda']:+.2f}" if release else None, delta_color="inverse")
+    m[2].metric("Holgura covenant", sv.fmt("holgura", sim["holgura"]),
+                f"{(sim['holgura'] - base['holgura']) * 100:+.1f} pts" if release else None)
+    m[3].metric("Ahorro de intereses", f"US$ {release * rate:,.1f} mm/año")
+
+    tb = sv.scenario_table(tab, period, release, use)
+    rows = [[x[0], x[1], f"{sv.ICON[x[2]]} {x[2]}", x[3], f"{sv.ICON[x[4]]} {x[4]}"] for x in tb["rows"]]
+    st.dataframe(pd.DataFrame(rows, columns=tb["headers"]), hide_index=True, width="stretch")
+    st.caption(f"Covenant deuda neta/EBITDA ≤ {tab.covenant:.1f}x (hoja Umbrales). El flujo libre suma la liberación "
+               "una sola vez: es caja de única vez, no flujo recurrente. Con 'Pagar deuda' baja también el pasivo; "
+               "con 'Mantener en caja' mejoran la razón ácida y caja/deuda CP.")
+    need = sv.thresholds_needed(tab, period, use)
+    if need:
+        st.subheader("¿Cuánto hay que liberar para llegar a verde?")
+        st.dataframe(pd.DataFrame([[n[0], n[1], f"{sv.ICON[n[2]]} {n[2]}",
+                                    f"US$ {n[3]:,.0f} mm" if n[3] is not None else sv._no_need(n)]
+                                   for n in need], columns=["Indicador", "Actual", "Semáforo", "Liberación necesaria"]),
+                     hide_index=True, width="stretch")
+    buf = io.BytesIO()
+    sv.write_solvency_report(tab, period, actions, value_lb, rate, use, buf)
+    st.download_button("Descargar escenario de solvencia (Excel)", buf.getvalue(), "escenario_solvencia.xlsx")
+    for w in tab.warnings:
+        st.warning(w)
+
+
+def aggregate_page(raw: bytes, tablero_raw: bytes | None = None) -> None:
     from inventory_optimizer import aggregate as ag
 
     data = ag.load_aggregate(io.BytesIO(raw))
+    tab = load_tab(tablero_raw, raw)
     p = data.params
     with st.sidebar:
         st.header("Supuestos")
@@ -122,10 +216,17 @@ def aggregate_page(raw: bytes) -> None:
              f"Advertencias ({len(data.warnings)})"]
     if data.celonis is not None:
         names.append("Detalle Celonis")
+    if tab is not None:
+        names.append("Solvencia")
     tabs = st.tabs(names)
     if data.celonis is not None:
         with tabs[6]:
             celonis_view(data.celonis, ag.latest_pt_month(data), data.sales_market)
+    if tab is not None:
+        with tabs[-1]:
+            solvency_view(tab, r)
+    elif tablero_raw is None:
+        st.sidebar.caption("Sube el tablero de solvencia para ver el impacto en deuda neta/EBITDA y covenant.")
     with tabs[0]:
         st.dataframe(pd.DataFrame(ag.kpis(r), columns=["Indicador", "Actual", "Demostrado (P25)", "Técnico"]),
                      hide_index=True, width="stretch")
@@ -207,6 +308,19 @@ def df(tb: dict) -> pd.DataFrame:
 
 from inventory_optimizer.celonis import is_celonis_only, load_celonis  # noqa: E402
 
+_only_tab = upload is None and tablero_raw is not None          # solo se subió el tablero
+_only_tab = _only_tab or (upload is not None and not is_aggregate_workbook(io.BytesIO(source))
+                          and load_tab(source) is not None)    # el tablero se subió como archivo principal
+if _only_tab:
+    # solo el tablero: indicadores y semáforos sin acciones de inventario
+    _tab = load_tab(tablero_raw, source)
+    if _tab is None:
+        st.error("No encontré las hojas Tablero/Umbrales con datos en el archivo.")
+        st.stop()
+    st.info("Solo tablero de solvencia. Sube también el modelo de inventario para calcular el impacto de cada acción.")
+    solvency_view(_tab)
+    st.stop()
+
 if is_celonis_only(io.BytesIO(source)):
     st.info("Archivo de Celonis (detalle por lote). Para cruzarlo con la rotación, súbelo dentro del modelo "
             "(hoja 11_Celonis_Detalle) o sube el modelo completo.")
@@ -214,7 +328,7 @@ if is_celonis_only(io.BytesIO(source)):
     st.stop()
 
 if is_aggregate_workbook(io.BytesIO(source)):
-    aggregate_page(source)
+    aggregate_page(source, tablero_raw)
     st.stop()
 
 ds = load_excel(io.BytesIO(source))
