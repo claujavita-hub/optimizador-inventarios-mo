@@ -108,6 +108,7 @@ def load_celonis(source) -> CelonisData | None:
     wb = load_workbook(source, data_only=True, read_only=True)
     try:
         names = sorted(wb.sheetnames, key=lambda n: 0 if "celonis" in norm(n) and "detalle" in norm(n) else 1)
+        found: list[CelonisData] = []
         for name in names:
             idx, body = _find_header(wb[name])
             if not idx:
@@ -124,12 +125,18 @@ def load_celonis(source) -> CelonisData | None:
                                 str(get("warehouse") or ""), str(get("material") or ""), str(get("batch") or ""),
                                 to_float(get("qty")), to_float(get("days")), to_float(get("target"))))
             if lots:
-                data = CelonisData(lots, name)
-                if data.missing_qty:
-                    data.warnings.append(f"{data.missing_qty} lotes sin cantidad en Celonis: revisar antes de cerrar.")
-                data.warnings.append("Unidad asumida: libras de Mo contenido (confirmar).")
-                return data
-        return None
+                found.append(CelonisData(lots, name))
+        if not found:
+            return None
+        # Si hay más de un corte, se usa el que trae metas de días (export más reciente de Inventory Balance).
+        data = next((d for d in found if d.has_targets), found[0])
+        if data.missing_qty:
+            data.warnings.append(f"{data.missing_qty} filas sin cantidad en Celonis ({data.sheet}): revisar.")
+        if len(found) > 1:
+            data.warnings.append(f"Se usa el corte de Celonis de la hoja {data.sheet}; otras hojas Celonis: "
+                                 + ", ".join(d.sheet for d in found if d is not data) + ".")
+        data.warnings.append("Unidad asumida: libras de Mo contenido (confirmar).")
+        return data
     finally:
         wb.close()
         if hasattr(source, "seek"):
