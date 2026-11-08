@@ -931,7 +931,9 @@ def write_aggregate_report(r: AggResult, path) -> None:
                          ("Celonis_Planta", cz.plant_table(c)), ("Celonis_Bodegas", cz.warehouse_table(c)),
                          ("Celonis_Conciliacion", cz.reconciliation_table(c, latest_pt_month(r.data))),
                          *((("Celonis_Dias_Mercado", cz.transit_days_table(c, r.data.sales_market)),)
-                           if r.data.sales_market else ())):
+                           if r.data.sales_market else ()),
+                         *((("Celonis_Metas", cz.target_table(c, r.data.params.precio_usd_lb)),)
+                           if c.has_targets else ())):
             ws = wb.create_sheet(name)
             nxt = _table(ws, 1, tb["headers"], tb["rows"], tb["fmts"])
             _widths(ws, {1: 44, 2: 16, 5: 30})

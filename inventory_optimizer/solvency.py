@@ -230,8 +230,18 @@ def inventory_actions(r, target_transit: float = 45, target_bodega: float = 20,
             acts.append(Action("A2", "Ajustar compras de concentrado a la producción (Pre-PT)", exc, "Validado",
                                f"Pre-PT {last[0].label}–{last[-1].label} {stock:.2f} MMlb vs {days:.0f} días x "
                                f"producción propia {prod * 30:.2f} MMlb/mes = {prod * days:.2f}", True))
-    # Por mercado (Celonis + ventas)
-    if data.celonis is not None and data.sales_market:
+    # Por mercado: contra las metas de días de Celonis si el export las trae; si no, días objetivo x venta
+    if data.celonis is not None and data.celonis.has_targets:
+        names = {"Transit": "tránsito", "Ext.WH": "bodegas"}
+        for (m, st), (q, d, t, ex) in sorted(data.celonis.excess_vs_target().items(), key=lambda x: -x[1][3]):
+            if st not in names or ex <= 0.05 or norm(m) == "not_assigned":
+                continue
+            acts.append(Action(f"{'T' if st == 'Transit' else 'B'}-{m}",
+                               f"Llevar {names[st]} de {m} a la meta Celonis ({t:.0f} días)", ex,
+                               "Validado" if st == "Ext.WH" else "Por validar",
+                               f"Celonis: {q:.2f} MMlb a {d:.0f} días vs meta {t:.0f} días (exceso por material)",
+                               st == "Ext.WH"))
+    elif data.celonis is not None and data.sales_market:
         mk = data.celonis.by("market", "stage")
         for m, v in sorted(data.sales_market.items(), key=lambda x: -x[1]):
             if v <= 0:

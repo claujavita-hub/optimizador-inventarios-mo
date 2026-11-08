@@ -306,3 +306,20 @@ class SolvencyTest(unittest.TestCase):
         need = {n[0]: n[3] for n in thresholds_needed(t, "P1")}
         self.assertEqual(need["Días de inventario"], 80)   # 1000-x <= 140*2400/365 = 920.5
         self.assertEqual(len(scenario_table(t, "P1", 50)["rows"]), 10)
+
+
+class CelonisTargetsTest(unittest.TestCase):
+    def test_excess_vs_target(self):
+        from inventory_optimizer.celonis import load_celonis, target_table
+        src = _xlsx({"Sheet1": [["Market", "Stage", "Material", "Inventory (lbs)", "Days of Inventory (12 mo)",
+                                 "Target Days of Inventory", "Deviation%"],
+                                ["India", "Transit", "2021", 2_000_000, 100, 75, 0.33],
+                                ["India", "Transit", "2020", 1_000_000, 50, 75, 0.33],
+                                ["Europe", "Ext.WH", "2007", 500_000, 10, 20, 0.5]]})
+        c = load_celonis(src)
+        self.assertTrue(c.has_targets)
+        q, d, t, ex = c.excess_vs_target()[("India", "Transit")]
+        self.assertAlmostEqual(q, 3.0)
+        self.assertAlmostEqual(ex, 0.5)          # solo el 2021 supera la meta: 2.0 x (1 - 75/100)
+        self.assertAlmostEqual(c.excess_vs_target()[("Europe", "Ext.WH")][3], 0.0)
+        self.assertEqual(target_table(c)["rows"][0][0], "India")

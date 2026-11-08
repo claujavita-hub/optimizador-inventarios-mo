@@ -221,7 +221,7 @@ def aggregate_page(raw: bytes, tablero_raw: bytes | None = None) -> None:
     tabs = st.tabs(names)
     if data.celonis is not None:
         with tabs[6]:
-            celonis_view(data.celonis, ag.latest_pt_month(data), data.sales_market)
+            celonis_view(data.celonis, ag.latest_pt_month(data), data.sales_market, p.precio_usd_lb)
     if tab is not None:
         with tabs[-1]:
             solvency_view(tab, r)
@@ -265,13 +265,19 @@ def aggregate_page(raw: bytes, tablero_raw: bytes | None = None) -> None:
             st.warning(w)
 
 
-def celonis_view(c, month=None, sales=None) -> None:
+def celonis_view(c, month=None, sales=None, price: float = 33.0) -> None:
     from inventory_optimizer import celonis as cz
 
     st.caption(f"Foto por lote del producto terminado ({len(c.lots)} lotes, {c.total:.2f} MMlb). Desagrega el PT, "
                "no se suma al stock del dashboard.")
     st.subheader("Por mercado y etapa")
     st.dataframe(df(cz.stage_market_table(c)), hide_index=True, width="stretch")
+    if c.has_targets:
+        st.subheader("Stock vs metas de días de Celonis")
+        st.dataframe(df(cz.target_table(c, price)), hide_index=True, width="stretch")
+        st.caption("Exceso = stock x (1 − meta/días) en cada material que supera su meta. Los días los calcula "
+                   "Celonis sobre el consumo de 12 meses. El 'Not Assigned' tiene días muy altos porque su base de "
+                   "consumo es distinta: no se usa como acción.")
     if sales:
         st.subheader("Días de venta en tránsito y en bodega, por mercado")
         st.dataframe(df(cz.transit_days_table(c, sales)), hide_index=True, width="stretch")

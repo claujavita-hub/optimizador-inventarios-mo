@@ -26,6 +26,8 @@ COLS = {
     "material": ("material",),
     "batch": ("batch", "lote"),
     "qty": ("inventory_qty", "inventory", "cantidad_lb", "cantidad", "qty"),
+    "days": ("days_of_inventory", "dias_de_inventario"),
+    "target": ("target_days", "dias_objetivo", "meta_dias"),
 }
 STAGES = ("Plant", "Transit", "Ext.WH")
 
@@ -39,6 +41,8 @@ class Lot:
     material: str
     batch: str
     lb: float | None
+    days: float | None = None       # días de inventario que informa Celonis (consumo 12 meses)
+    target: float | None = None     # meta de días de Celonis
 
 
 @dataclass
@@ -56,6 +60,28 @@ class CelonisData:
         for l in self.lots:
             out[tuple(getattr(l, a) for a in attrs)] += (l.lb or 0) / 1e6
         return dict(out)
+
+    @property
+    def has_targets(self) -> bool:
+        return any(l.target is not None and l.days is not None for l in self.lots)
+
+    def excess_vs_target(self) -> dict[tuple[str, str], tuple[float, float, float, float | None]]:
+        """Por (mercado, etapa): (MMlb, días ponderados, meta ponderada, exceso MMlb sobre la meta de Celonis).
+
+        Exceso de cada fila = stock x (1 - meta/días) si días > meta: el stock que sobra al consumo con que
+        Celonis calcula los días."""
+        acc: dict[tuple[str, str], list[float]] = defaultdict(lambda: [0.0, 0.0, 0.0, 0.0, 0.0])
+        for l in self.lots:
+            if not l.lb or l.days is None or l.target is None:
+                continue
+            a = acc[(l.market, l.stage)]
+            q = l.lb / 1e6
+            a[0] += q
+            a[1] += q * l.days
+            a[2] += q * l.target
+            if l.days > l.target:
+                a[3] += q * (1 - l.target / l.days)
+        return {k: (a[0], a[1] / a[0], a[2] / a[0], a[3]) for k, a in acc.items() if a[0] > 0}
 
     @property
     def missing_qty(self) -> int:
@@ -96,7 +122,7 @@ def load_celonis(source) -> CelonisData | None:
                     continue
                 lots.append(Lot(str(get("market") or ""), str(stage), str(get("plant") or ""),
                                 str(get("warehouse") or ""), str(get("material") or ""), str(get("batch") or ""),
-                                to_float(get("qty"))))
+                                to_float(get("qty")), to_float(get("days")), to_float(get("target"))))
             if lots:
                 data = CelonisData(lots, name)
                 if data.missing_qty:
@@ -148,6 +174,17 @@ def transit_days_table(c: CelonisData, sales: dict[str, float]) -> dict:
     return dict(headers=["Mercado", "Venta MMlb/mes", "Tránsito MMlb", "Días de venta en tránsito",
                          "Bodega externa MMlb", "Días de venta en bodega"],
                 rows=rows, fmts=[None, "0.00", "0.00", "0", "0.00", "0"])
+
+
+def target_table(c: CelonisData, price: float = 33.0) -> dict:
+    """Stock vs metas de días de Celonis, por mercado y etapa."""
+    rows = []
+    for (m, st), (q, d, t, ex) in sorted(c.excess_vs_target().items(), key=lambda x: -x[1][3]):
+        rows.append([m, st, q, d, t, ex, ex * price,
+                     "Revisar base de cálculo (días sobre consumo del no asignado)" if norm(m) == "not_assigned" else ""])
+    return dict(headers=["Mercado", "Etapa", "Stock MMlb", "Días Celonis", "Meta días", "Exceso sobre meta MMlb",
+                         "Exceso US$mm", "Nota"],
+                rows=rows, fmts=[None, None, "0.00", "0", "0", "0.00", "0.0", None])
 
 
 def is_celonis_only(source) -> bool:
