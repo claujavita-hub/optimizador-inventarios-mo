@@ -48,6 +48,7 @@ INDICATORS = [
     ("Días de inventario", "dias_inventario", "menor", 150.0, 180.0),
     ("Holgura de EBITDA hasta covenant", "holgura", "mayor", 0.30, 0.15),
 ]
+NO_CP = 999.0                     # caja / deuda CP cuando ya no queda deuda de corto plazo
 FMT = {"flujo_libre": "{:,.1f}", "holgura": "{:.1%}", "dias_inventario": "{:.0f}"}
 
 
@@ -233,7 +234,11 @@ def indicators(d: dict[str, float | None], covenant: float, release: float = 0.0
         ac_x, pc_x, pasivo_x = ac, pc, pasivo                     # inventario se transforma en caja
     nd = deuda - caja
     ebitda = g("ebitda")
-    gf = g("gastos_fin") - release * rate if g("gastos_fin") is not None else None
+    gf0, nd0 = g("gastos_fin"), g("deuda") - g("caja")
+    # Ahorro de gastos financieros: a la tasa indicada, con tope en la tasa efectiva neta actual (GF / deuda neta)
+    # para no sobrestimar la cobertura (los GF netos incluyen ingresos financieros y deuda más barata).
+    eff = min(rate, gf0 / nd0) if gf0 is not None and nd0 > 0 else rate
+    gf = gf0 - release * eff if gf0 is not None else None
     if holgura_tipo == "cobertura" and cov_cobertura:
         holgura = 1 - cov_cobertura * gf / ebitda if ebitda and gf is not None else None
     else:
@@ -245,7 +250,7 @@ def indicators(d: dict[str, float | None], covenant: float, release: float = 0.0
                         if g("flujo_operacional") is not None else None),
         "liquidez": ac_x / pc_x if ac_x is not None and pc_x else None,
         "acida": (ac_x - inv_x) / pc_x if None not in (ac_x, inv_x) and pc_x else None,
-        "caja_cp": caja / deuda_cp if deuda_cp else None,
+        "caja_cp": caja / deuda_cp if deuda_cp > 1e-9 else NO_CP,
         "pasivo_patrimonio": pasivo_x / g("patrimonio") if pasivo_x is not None and g("patrimonio") else None,
         "dias_inventario": inv_x / g("costo_ventas") * 365 if inv_x is not None and g("costo_ventas") else None,
         "holgura": holgura,
@@ -257,6 +262,8 @@ def indicators(d: dict[str, float | None], covenant: float, release: float = 0.0
 def fmt(key: str, v: float | None) -> str:
     if v is None:
         return "s/d"
+    if key == "caja_cp" and v >= NO_CP:
+        return "sin deuda CP"
     return FMT.get(key, "{:.2f}").format(v)
 
 

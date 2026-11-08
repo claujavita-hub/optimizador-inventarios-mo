@@ -345,6 +345,8 @@ class SolvencyCovenantSectionTest(unittest.TestCase):
         th = next(x for x in t.thresholds if x.key == "pasivo_patrimonio")
         self.assertEqual((th.green, th.yellow, th.better), (1.4, 1.75, "menor"))
         self.assertAlmostEqual(t.ind("Sep-26")["holgura"], 1 - 2 * 40 / 200)
-        self.assertAlmostEqual(t.ind("Sep-26", 100, "caja", 0.1)["cobertura"], 200 / 30)
+        # tasa 10% con tope en la tasa efectiva GF / deuda neta = 40 / 500 = 8%: GF 40 - 100 x 8% = 32
+        self.assertAlmostEqual(t.ind("Sep-26", 100, "caja", 0.1)["cobertura"], 200 / 32)
+        self.assertEqual(t.ind("Sep-26", 100, "deuda")["caja_cp"], 999.0)    # deuda CP pagada completa
         self.assertEqual(len(indicators_covenants(t, "Sep-26")), 3)
         self.assertTrue(any("Sep-26" in w and "costo de ventas" in w for w in t.warnings))

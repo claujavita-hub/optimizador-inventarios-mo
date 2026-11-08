@@ -142,8 +142,9 @@ def solvency_view(tab, r=None) -> None:
     tb = sv.scenario_table(tab, period, release, use, rate)
     rows = [[x[0], x[1], f"{sv.ICON[x[2]]} {x[2]}", x[3], f"{sv.ICON[x[4]]} {x[4]}"] for x in tb["rows"]]
     st.dataframe(pd.DataFrame(rows, columns=tb["headers"]), hide_index=True, width="stretch")
-    st.caption(f"{tab.holgura_desc}. Los gastos financieros bajan en liberación x tasa "
-               f"({rate:.1%}): intereses que se dejan de pagar o que gana la caja. El flujo libre suma la "
+    st.caption(f"{tab.holgura_desc}. Para cobertura y holgura, los gastos financieros bajan en liberación x tasa, "
+               f"con tope en la tasa efectiva neta actual (gastos financieros / deuda neta); el ahorro de intereses "
+               f"de arriba usa la tasa de deuda incremental ({rate:.1%}). El flujo libre suma la "
                "liberación una sola vez (caja de única vez, no flujo recurrente). Con 'Pagar deuda' baja también "
                "el pasivo; con 'Mantener en caja' mejoran la razón ácida y caja/deuda CP.")
     if tab.covenants:
