@@ -35,6 +35,8 @@ def _table(ws, row: int, headers: list[str], rows: list[list], fmts: list[str | 
     for i, values in enumerate(rows, start=row + 1):
         for j, v in enumerate(values, start=1):
             c = ws.cell(i, j, v)
+            if isinstance(v, str) and v.startswith("="):
+                c.data_type = "s"          # texto, no fórmula (evita #NAME? en Excel)
             if fmts and j - 1 < len(fmts) and fmts[j - 1] and isinstance(v, (int, float)):
                 c.number_format = fmts[j - 1]
         if status_col is not None:

@@ -741,7 +741,7 @@ def balance_table(r: "AggResult") -> dict:
     rows = [["Producción", b["produccion"]], ["(−) Venta propia (Own Sales)", b["venta"]],
             ["(−) Maquila", b["maquila"]],
             [f"Stock inicial ({b['base']})", b["stock_inicial"]], [f"Stock final ({b['hasta']})", b["stock_final"]],
-            ["(−) Variación de stock", b["dstock"]], ["= Diferencia sin explicar", b["gap"]],
+            ["(−) Variación de stock", b["dstock"]], ["Diferencia sin explicar", b["gap"]],
             ["Saldo inicial que cerraría el balance", b["saldo_inicial_implicito"]]]
     return dict(headers=["Concepto", "MMlb"], rows=rows, fmts=[None, X1])
 
