@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 
 from openpyxl import load_workbook
 
-from .loader import to_float
+from .loader import to_float, to_month
 from .schema import norm
 
 INPUTS = {
@@ -71,8 +71,22 @@ class Threshold:
 class Tablero:
     periods: dict[str, dict[str, float | None]]     # período -> datos de entrada
     thresholds: list[Threshold]
-    covenant: float = 3.0
+    covenant: float = 3.0                 # límite de deuda neta / EBITDA (formato antiguo)
+    holgura_tipo: str = "deuda_neta"      # "deuda_neta" o "cobertura" (EBITDA / gastos financieros)
+    cov_cobertura: float | None = None    # covenant mínimo EBITDA / gastos financieros
+    covenants: list[list] = field(default_factory=list)   # [nombre, condición, límite]
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def holgura_desc(self) -> str:
+        if self.holgura_tipo == "cobertura":
+            return (f"Holgura = cuánto puede caer el EBITDA antes de tocar el covenant de cobertura "
+                    f"(EBITDA / gastos financieros > {self.cov_cobertura:.1f}x)")
+        return f"Holgura = margen de deuda neta antes del covenant deuda neta / EBITDA ≤ {self.covenant:.1f}x"
+
+    def ind(self, period: str, release: float = 0.0, use: str = "caja", rate: float = 0.0) -> dict:
+        return indicators(self.periods[period], self.covenant, release, use, rate,
+                          self.holgura_tipo, self.cov_cobertura)
 
     @property
     def latest(self) -> str | None:
@@ -125,25 +139,46 @@ def load_tablero(source) -> Tablero | None:
             for j, p in cols:
                 periods[p][key] = to_float(r[j]) if j < len(r) else None
         tab = Tablero(periods, [Threshold(*i) for i in INDICATORS])
-        # umbrales y covenant
+        # umbrales y covenants
         for name in wb.sheetnames:
             if "umbral" not in norm(name):
                 continue
+            in_cov = False
             for r in wb[name].iter_rows(values_only=True):
                 if not r or not r[0]:
                     continue
                 t = norm(r[0])
-                if t.startswith("covenant") and len(r) > 2:
+                if t.startswith("covenants"):            # sección "Covenants financieros"
+                    in_cov = True
+                    continue
+                if t.startswith("covenant") and not in_cov and len(r) > 2:   # formato antiguo: una fila
                     cov = to_float(r[2]) if to_float(r[2]) is not None else to_float(r[1])
                     if cov:
                         tab.covenant = cov
+                    continue
+                if in_cov:
+                    lim = to_float(r[2]) if len(r) > 2 else None
+                    if lim is None or t.startswith("holgura") or t == "covenant":
+                        continue
+                    tab.covenants.append([str(r[0]), str(r[1] or ""), lim])
+                    if t.startswith("ebitda_gastos_financieros") and ">" in str(r[1] or ""):
+                        tab.holgura_tipo, tab.cov_cobertura = "cobertura", lim
+                    elif t.startswith("deuda_neta") and "<" in str(r[1] or ""):
+                        tab.covenant = lim
+                    continue
                 for th in tab.thresholds:
-                    if t == norm(th.name) and len(r) > 3:
+                    if t.startswith(norm(th.name)) and len(r) > 3:
                         g, y = to_float(r[2]), to_float(r[3])
                         if g is not None and y is not None:
                             th.green, th.yellow = g, y
                         if r[1]:
                             th.better = "mayor" if "mayor" in norm(r[1]) else "menor"
+                        th.name = str(r[0])
+                        break
+        if tab.holgura_tipo == "cobertura":
+            next(th for th in tab.thresholds if th.key == "holgura").name = (
+                f"Holgura de EBITDA hasta covenant de cobertura ({tab.cov_cobertura:.1f}x)")
+        _check_periods(tab)
         return tab
     finally:
         wb.close()
@@ -151,12 +186,35 @@ def load_tablero(source) -> Tablero | None:
             source.seek(0)
 
 
+def _check_periods(tab: Tablero) -> None:
+    """Avisos de datos que no parecen comparables entre períodos."""
+    prev = None
+    for p, d in tab.periods.items():
+        cv = d.get("costo_ventas")
+        if cv is None:
+            continue
+        if prev is not None and cv < 0.8 * prev[1]:
+            mk = to_month(p)
+            n = int(mk[5:7]) if mk else None
+            extra = (f" Anualizado ({n} meses), los días de inventario serían "
+                     f"{d['inventario'] / (cv / n * 12) * 365:.0f} en vez de {d['inventario'] / cv * 365:.0f}."
+                     if n and n < 12 and d.get("inventario") else "")
+            tab.warnings.append(
+                f"{p}: el costo de ventas ({cv:,.1f}) es {1 - cv / prev[1]:.0%} menor que en {prev[0]} "
+                f"({prev[1]:,.1f}). Si es el acumulado del año y no los últimos 12 meses, los días de inventario "
+                "quedan inflados." + extra)
+        prev = (p, cv)
+    tab.warnings = [w for w in tab.warnings if w]
+
+
 def indicators(d: dict[str, float | None], covenant: float, release: float = 0.0,
-               use: str = "caja") -> dict[str, float | None]:
+               use: str = "caja", rate: float = 0.0, holgura_tipo: str = "deuda_neta",
+               cov_cobertura: float | None = None) -> dict[str, float | None]:
     """Indicadores del tablero, opcionalmente liberando `release` (US$ mm) de inventario.
 
     use = "caja": la caja liberada queda en caja. use = "deuda": se usa para pagar deuda
-    (primero la de corto plazo)."""
+    (primero la de corto plazo). rate: tasa anual con que la liberación baja los gastos
+    financieros netos (intereses que se dejan de pagar o que gana la caja)."""
     g = lambda k: d.get(k)  # noqa: E731
     if None in (g("ebitda"), g("deuda"), g("caja")):
         return {k: None for _, k, *_ in INDICATORS}
@@ -175,9 +233,14 @@ def indicators(d: dict[str, float | None], covenant: float, release: float = 0.0
         ac_x, pc_x, pasivo_x = ac, pc, pasivo                     # inventario se transforma en caja
     nd = deuda - caja
     ebitda = g("ebitda")
+    gf = g("gastos_fin") - release * rate if g("gastos_fin") is not None else None
+    if holgura_tipo == "cobertura" and cov_cobertura:
+        holgura = 1 - cov_cobertura * gf / ebitda if ebitda and gf is not None else None
+    else:
+        holgura = 1 - nd / (covenant * ebitda) if ebitda else None
     out = {
         "nd_ebitda": nd / ebitda if ebitda else None,
-        "cobertura": ebitda / g("gastos_fin") if g("gastos_fin") else None,
+        "cobertura": ebitda / gf if gf else None,
         "flujo_libre": (g("flujo_operacional") - (g("capex") or 0) - (g("dividendos") or 0) + release
                         if g("flujo_operacional") is not None else None),
         "liquidez": ac_x / pc_x if ac_x is not None and pc_x else None,
@@ -185,7 +248,7 @@ def indicators(d: dict[str, float | None], covenant: float, release: float = 0.0
         "caja_cp": caja / deuda_cp if deuda_cp else None,
         "pasivo_patrimonio": pasivo_x / g("patrimonio") if pasivo_x is not None and g("patrimonio") else None,
         "dias_inventario": inv_x / g("costo_ventas") * 365 if inv_x is not None and g("costo_ventas") else None,
-        "holgura": 1 - nd / (covenant * ebitda) if ebitda else None,
+        "holgura": holgura,
         "deuda_neta": nd,
     }
     return out
@@ -276,9 +339,33 @@ def inventory_actions(r, target_transit: float = 45, target_bodega: float = 20,
     return acts
 
 
-def scenario_table(tab: Tablero, period: str, release: float, use: str = "caja") -> dict:
+def indicators_covenants(tab: Tablero, period: str, release: float = 0.0, use: str = "caja",
+                         rate: float = 0.0) -> list[list]:
+    """Covenants de la hoja Umbrales: valor actual, con acciones y si se cumple."""
+    base, sim = tab.ind(period), tab.ind(period, release, use, rate)
     d = tab.periods[period]
-    base, sim = indicators(d, tab.covenant), indicators(d, tab.covenant, release, use)
+    out = []
+    for name, cond, lim in tab.covenants:
+        t = norm(name)
+        if t.startswith("patrimonio"):
+            b = s_ = d.get("patrimonio")
+        elif t.startswith("ebitda_gastos"):
+            b, s_ = base["cobertura"], sim["cobertura"]
+        elif t.startswith("pasivo_total"):
+            b, s_ = base["pasivo_patrimonio"], sim["pasivo_patrimonio"]
+        elif t.startswith("deuda_neta"):
+            b, s_ = base["nd_ebitda"], sim["nd_ebitda"]
+        else:
+            continue
+        ok = None if s_ is None else (s_ > lim if ">" in cond else s_ < lim)
+        out.append([name, f"{cond} {lim:,.2f}".rstrip("0").rstrip("."),
+                    None if b is None else round(b, 2), None if s_ is None else round(s_, 2),
+                    "s/d" if ok is None else "✅ Sí" if ok else "❌ No"])
+    return out
+
+
+def scenario_table(tab: Tablero, period: str, release: float, use: str = "caja", rate: float = 0.0) -> dict:
+    base, sim = tab.ind(period), tab.ind(period, release, use, rate)
     rows = []
     for th in tab.thresholds:
         b, s = base.get(th.key), sim.get(th.key)
@@ -288,17 +375,16 @@ def scenario_table(tab: Tablero, period: str, release: float, use: str = "caja")
                 rows=rows, fmts=[None] * 5)
 
 
-def thresholds_needed(tab: Tablero, period: str, use: str = "caja") -> list[list]:
+def thresholds_needed(tab: Tablero, period: str, use: str = "caja", rate: float = 0.0) -> list[list]:
     """Cuánto hay que liberar para que cada indicador amarillo/rojo pase a verde (búsqueda simple)."""
-    d = tab.periods[period]
     out = []
     for th in tab.thresholds:
-        cur = indicators(d, tab.covenant).get(th.key)
+        cur = tab.ind(period).get(th.key)
         if th.color(cur) in ("Verde", "s/d"):
             continue
         def search(mode):
             for x in range(0, 2001):
-                if th.color(indicators(d, tab.covenant, float(x), mode).get(th.key)) == "Verde":
+                if th.color(tab.ind(period, float(x), mode, rate).get(th.key)) == "Verde":
                     return float(x)
             return None
         need = search(use)
@@ -337,7 +423,7 @@ def write_solvency_report(tab: Tablero, period: str, actions: list[Action], valu
                + ("usada para pagar deuda" if use == "deuda" else "mantenida en caja")
                + f" · ahorro de intereses US$ {release * rate:,.1f} mm/año"])
     ws.append([])
-    tb = scenario_table(tab, period, release, use)
+    tb = scenario_table(tab, period, release, use, rate)
     ws.append(tb["headers"])
     for row in tb["rows"]:
         ws.append(row)
@@ -349,7 +435,7 @@ def write_solvency_report(tab: Tablero, period: str, actions: list[Action], valu
     ws.append(["Liberación necesaria para llegar a verde (US$ mm)"])
     ws.cell(ws.max_row, 1).font = Font(bold=True)
     ws.append(["Indicador", "Actual", "Semáforo", "US$ mm a liberar"])
-    for row in thresholds_needed(tab, period, use):
+    for row in thresholds_needed(tab, period, use, rate):
         ws.append([*row[:3], row[3] if row[3] is not None else _no_need(row)])
     a = wb.create_sheet("Acciones")
     a.append(["Código", "Acción", "MMlb", "US$ mm", "Estado", "Base del cálculo"])

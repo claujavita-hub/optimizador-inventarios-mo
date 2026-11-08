@@ -323,3 +323,28 @@ class CelonisTargetsTest(unittest.TestCase):
         self.assertAlmostEqual(ex, 0.5)          # solo el 2021 supera la meta: 2.0 x (1 - 75/100)
         self.assertAlmostEqual(c.excess_vs_target()[("Europe", "Ext.WH")][3], 0.0)
         self.assertEqual(target_table(c)["rows"][0][0], "India")
+
+
+class SolvencyCovenantSectionTest(unittest.TestCase):
+    def test_coverage_covenant_and_partial_cost(self):
+        from inventory_optimizer.solvency import indicators_covenants, load_tablero
+        labels = ["EBITDA últimos 12 meses", "Gastos financieros netos 12 m", "Deuda financiera total",
+                  "Deuda financiera corto plazo", "Caja y depósitos", "Activo corriente", "Inventario corriente",
+                  "Pasivo corriente", "Pasivo total", "Patrimonio", "Costo de ventas 12 m"]
+        p1 = [200, 25, 600, 50, 100, 1500, 1000, 500, 1200, 1000, 2400]
+        p2 = [200, 40, 600, 50, 100, 1500, 1000, 500, 1200, 1000, 1200]
+        tab = [["Tablero"], ["Datos de entrada", "Jun-26", "Sep-26"]] + [[l, a, b] for l, a, b in zip(labels, p1, p2)]
+        umb = [["Indicador", "Criterio", "Límite verde", "Límite amarillo"],
+               ["Pasivo total / patrimonio contable (covenant < 1,75x)", "Menor es mejor", 1.4, 1.75],
+               ["Covenants financieros"], ["Covenant", "Condición", "Límite"],
+               ["Patrimonio (M$)", ">", 300], ["EBITDA / gastos financieros netos (x)", ">", 2],
+               ["Pasivo total / patrimonio, definición del contrato (x)", "<", 1.75],
+               ["Holgura mínima para verde", None, 0.3]]
+        t = load_tablero(_xlsx({"Tablero": tab, "Umbrales": umb}))
+        self.assertEqual((t.holgura_tipo, t.cov_cobertura), ("cobertura", 2))
+        th = next(x for x in t.thresholds if x.key == "pasivo_patrimonio")
+        self.assertEqual((th.green, th.yellow, th.better), (1.4, 1.75, "menor"))
+        self.assertAlmostEqual(t.ind("Sep-26")["holgura"], 1 - 2 * 40 / 200)
+        self.assertAlmostEqual(t.ind("Sep-26", 100, "caja", 0.1)["cobertura"], 200 / 30)
+        self.assertEqual(len(indicators_covenants(t, "Sep-26")), 3)
+        self.assertTrue(any("Sep-26" in w and "costo de ventas" in w for w in t.warnings))

@@ -130,8 +130,8 @@ def solvency_view(tab, r=None) -> None:
     release += extra
     rate = r.data.params.tasa_costo_capital if r is not None else 0.08
     m = st.columns(4)
-    base = sv.indicators(tab.periods[period], tab.covenant)
-    sim = sv.indicators(tab.periods[period], tab.covenant, release, use)
+    base = tab.ind(period)
+    sim = tab.ind(period, release, use, rate)
     m[0].metric("Liberación total", f"US$ {release:,.0f} mm")
     m[1].metric("Deuda neta / EBITDA", sv.fmt("nd_ebitda", sim["nd_ebitda"]),
                 f"{sim['nd_ebitda'] - base['nd_ebitda']:+.2f}" if release else None, delta_color="inverse")
@@ -139,13 +139,19 @@ def solvency_view(tab, r=None) -> None:
                 f"{(sim['holgura'] - base['holgura']) * 100:+.1f} pts" if release else None)
     m[3].metric("Ahorro de intereses", f"US$ {release * rate:,.1f} mm/año")
 
-    tb = sv.scenario_table(tab, period, release, use)
+    tb = sv.scenario_table(tab, period, release, use, rate)
     rows = [[x[0], x[1], f"{sv.ICON[x[2]]} {x[2]}", x[3], f"{sv.ICON[x[4]]} {x[4]}"] for x in tb["rows"]]
     st.dataframe(pd.DataFrame(rows, columns=tb["headers"]), hide_index=True, width="stretch")
-    st.caption(f"Covenant deuda neta/EBITDA ≤ {tab.covenant:.1f}x (hoja Umbrales). El flujo libre suma la liberación "
-               "una sola vez: es caja de única vez, no flujo recurrente. Con 'Pagar deuda' baja también el pasivo; "
-               "con 'Mantener en caja' mejoran la razón ácida y caja/deuda CP.")
-    need = sv.thresholds_needed(tab, period, use)
+    st.caption(f"{tab.holgura_desc}. Los gastos financieros bajan en liberación x tasa "
+               f"({rate:.1%}): intereses que se dejan de pagar o que gana la caja. El flujo libre suma la "
+               "liberación una sola vez (caja de única vez, no flujo recurrente). Con 'Pagar deuda' baja también "
+               "el pasivo; con 'Mantener en caja' mejoran la razón ácida y caja/deuda CP.")
+    if tab.covenants:
+        cov = sv.indicators_covenants(tab, period, release, use, rate)
+        st.subheader("Covenants financieros")
+        st.dataframe(pd.DataFrame(cov, columns=["Covenant", "Límite", f"{period} actual", "Con acciones",
+                                                "Cumple"]), hide_index=True, width="stretch")
+    need = sv.thresholds_needed(tab, period, use, rate)
     if need:
         st.subheader("¿Cuánto hay que liberar para llegar a verde?")
         st.dataframe(pd.DataFrame([[n[0], n[1], f"{sv.ICON[n[2]]} {n[2]}",
